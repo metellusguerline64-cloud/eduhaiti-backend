@@ -16,6 +16,11 @@ binding = "DB_TEST1"
 database_name = "eduhaiti-db-test1"
 database_id = "01520619-f59c-48a8-be22-050f0284c67a"
 
+[[d1_databases]]
+binding = "DB_MT9909"
+database_name = "eduhaiti-db-meigens-leraning-center"
+database_id = "36d69d00-b0d4-4943-ac26-b27848f81956"
+
 # SCHOOL_D1_BINDINGS_END
 
 # Next school, once created:
