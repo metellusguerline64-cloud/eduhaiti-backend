@@ -1,0 +1,1150 @@
+// Manual trigger for the Generated_IDs sync (src/lib/generatedIdsSync.js).
+// The Cron Trigger in src/index.js is the primary path (every 10 min,
+// replacing Code.gs's ScriptApp trigger) — this action exists for
+// admin/testing use: `?action=syncGeneratedIds` or
+// `?action=syncGeneratedIds&force=true` to bypass both throttle stamps.
+//
+// Code.gs called the equivalent (_scheduleGeneratedIdsSync_) unconditionally
+// on every doGet with no auth check, since it was self-throttling. This
+// port keeps that same no-auth-required behavior for parity; tighten to
+// an admin-role check once real role-based auth is ported in Phase 1.
+
+import { runGeneratedIdsSync, normalizePhotoUrl } from "../lib/generatedIdsSync.js";
+import { resolveOrgId } from "../lib/org.js";
+import { writeAudit } from "../lib/audit.js";
+import { loadViewer, filterStudents, assertStudentAccess } from "../lib/accessScope.js";
+import { getSetting, getActiveAcademicYear } from "../lib/settings.js";
+import { fetchSheetValues } from "../lib/sheetsApi.js";
+import { hashPin } from "../lib/hash.js";
+
+export async function syncGeneratedIds(data, _auth, env) {
+  const force = String(data.force || "").toLowerCase() === "true";
+  return runGeneratedIdsSync(env, { force });
+}
+
+// ============================================================
+// Student directory + lifecycle — REAL port of Code.gs's core student
+// actions, verified with Code.gs in context. Real tables: 'students'
+// (StudentCode/FirstName/LastName/... — already ported, see schema.sql
+// + generatedIdsSync.js) and 'student_history' (one row per
+// enrollment event — ACTIVE/DROPPED/ALUMNI, append-only, never
+// mutated in place except by updateStudent_'s in-place level/section
+// patch on the CURRENT active row). Ported functions:
+//   - getAllStudents_      → getAllStudents      (Code.gs ~line 7896)
+//   - getStudentById_      → getStudentById       (Code.gs ~line 7982)
+//   - searchStudents_      → searchStudents       (Code.gs ~line 8448)
+//   - getStudentHistory_   → getStudentHistory    (Code.gs ~line 8461)
+//   - updateStudent_       → updateStudent        (Code.gs ~line 8309)
+//   - enrollStudent_ (+_enrollStudentInternal_) → enrollStudent (Code.gs ~line 8930/8841)
+//   - dropStudent_         → dropStudent          (Code.gs ~line 8944)
+//   - reEnrollStudent_     → reEnrollStudent      (Code.gs ~line 8990)
+//   - updateStudentHistory_ → updateStudentHistory (Code.gs ~line 9066)
+//   - addNewStudent_       → addNewStudent        (Code.gs ~line 8206, identity+history slice only)
+//   - resetStudentPin_     → resetStudentPin      (Code.gs ~line 23790)
+//   - lookupStudentGlobal_ → lookupStudentGlobal  (Code.gs ~line 8497)
+//
+// Deliberately NOT ported (flagged, not silently dropped):
+//   - paid% enrichment (_buildStudentPaidPercentMap_) in getAllStudents_
+//     — depends on the tuition-schedule resolver (computeStudentOutstanding_
+//     / getExpectedTuitionAmountForStudent_) that payments.js's header
+//     comment already flags as unported. `getAllStudents` here simply
+//     omits the `paid`/`Paid` field rather than faking a "0%" that could
+//     be misread as "unpaid".
+//   - Legacy helper names are not copied verbatim; their behavior is now
+//     implemented centrally in src/lib/accessScope.js and enforced by the
+//     action handlers/API hub.
+//   - SYSTEM_ID_MODE identity-lock in updateStudent_ (the "AUTO/COMPANY
+//     mode blocks editing name+code together" rule) — SYSTEM_ID_MODE
+//     isn't read here; studentId/name edits are simply not accepted at
+//     all via `updateStudent` (StudentCode is the primary key and
+//     FirstName/LastName aren't in the allow-list below), which is
+//     stricter than the original in every mode, not looser.
+//   - NISU substring match in searchStudents_ — same gap as
+//     verifyStudentByLast4_ in attendance.js (no NISU column in this
+//     D1 schema; it would live in custom_fields JSON).
+//   - Academic-year filtering in the attendance% map — ported (see
+//     buildAttendancePercentMap below) only when an `ACADEMIC_YEAR`
+//     setting in "YYYY-YYYY" shape is seeded; otherwise counts
+//     all-time attendance, same as the original's own fallback when
+//     ACADEMIC_YEAR can't be read.
+
+function authError() {
+  return { success: false, error: "Non authentifié." };
+}
+
+function safeParseJson(str) {
+  if (str && typeof str === "object") return str;
+  try {
+    return JSON.parse(str || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function resolveStudentId(payload) {
+  if (typeof payload === "string") return payload.trim();
+  const obj = payload || {};
+  return String(obj.studentId || obj.id || obj.StudentCode || obj.studentCode || "").trim();
+}
+
+// Ports _normalizeAttendanceStatusToken_ + _buildStudentAttendancePercentMap_'s
+// "presentLike vs absent, ignore everything else" ratio, including the
+// optional ACADEMIC_YEAR window filter (only applied when that setting
+// is seeded in "YYYY-YYYY" shape, same as the original's own guard).
+async function buildAttendancePercentMap(env, orgId) {
+  const academicYear = await getSetting(env.DB, "ACADEMIC_YEAR", "");
+  const parts = String(academicYear || "").split("-");
+  const yearStart = parts.length === 2 ? parts[0].trim() : "";
+  const yearEnd = parts.length === 2 ? parts[1].trim() : "";
+
+  const { results } = await env.DB.prepare(
+    `SELECT student_id, status, date FROM attendance WHERE org_id = ? AND deleted_at IS NULL`
+  )
+    .bind(orgId)
+    .all();
+
+  const counts = {};
+  for (const r of results || []) {
+    const sid = String(r.student_id || "").trim().toUpperCase();
+    if (!sid) continue;
+
+    if (yearStart && yearEnd) {
+      const dateStr = String(r.date || "").slice(0, 10);
+      const dateYear = dateStr.slice(0, 4);
+      const dateMonth = parseInt(dateStr.slice(5, 7), 10);
+      const inYearStart = dateYear === yearStart && dateMonth >= 8;
+      const inYearEnd = dateYear === yearEnd && dateMonth <= 8;
+      const inMiddle = parseInt(dateYear, 10) > parseInt(yearStart, 10) && parseInt(dateYear, 10) < parseInt(yearEnd, 10);
+      if (dateStr && !inYearStart && !inYearEnd && !inMiddle) continue;
+    }
+
+    const status = String(r.status || "").trim().toUpperCase();
+    if (!counts[sid]) counts[sid] = { presentLike: 0, absent: 0 };
+    if (status === "ABSENT") counts[sid].absent += 1;
+    else if (status === "PRESENT" || status === "LATE") counts[sid].presentLike += 1;
+  }
+
+  const map = {};
+  for (const sid of Object.keys(counts)) {
+    const c = counts[sid];
+    const total = c.presentLike + c.absent;
+    map[sid] = total > 0 ? Math.round((c.presentLike / total) * 100) : 0;
+  }
+  return map;
+}
+
+// Joins each student to their LATEST student_history row (ACTIVE or
+// not — same "latest wins" rule as _buildActiveHistoryMap /
+// _getLatestHistoryRow_), so callers can tell "currently enrolled" vs
+// "was enrolled, dropped" apart.
+async function fetchStudentsWithHistory(env, orgId, whereExtra = "", extraParams = []) {
+  const { results } = await env.DB.prepare(
+    `SELECT s.id, s.student_code, s.org_id, s.last_name, s.first_name, s.phone, s.gender,
+            s.birth_date, s.address, s.photo_url, s.current_level, s.section AS base_section,
+            s.enrollment_status, s.active, s.custom_fields, s.created_at, s.updated_at,
+            h.history_id, h.grade_level_id, h.section AS hist_section, h.school_year, h.status AS hist_status
+     FROM students s
+     LEFT JOIN (
+       SELECT student_id, history_id, grade_level_id, section, school_year, status, updated_at,
+              ROW_NUMBER() OVER (PARTITION BY student_id ORDER BY updated_at DESC) AS rn
+       FROM student_history WHERE org_id = ?
+     ) h ON h.student_id = s.student_code AND h.rn = 1
+     WHERE s.org_id = ? AND s.deleted_at IS NULL ${whereExtra}
+     ORDER BY s.last_name, s.first_name`
+  )
+    .bind(orgId, orgId, ...extraParams)
+    .all();
+  return results || [];
+}
+
+function studentRowToApi(r, attendancePctMap) {
+  const isActive = String(r.hist_status || "").toUpperCase() === "ACTIVE";
+  const canonicalId = r.student_code;
+  const pct = attendancePctMap ? Number(attendancePctMap[String(canonicalId).toUpperCase().trim()] || 0) : 0;
+  return {
+    StudentCode: r.student_code,
+    StudentID: canonicalId,
+    id: canonicalId,
+    studentId: canonicalId,
+    FirstName: r.first_name,
+    LastName: r.last_name,
+    Phone: r.phone,
+    Gender: r.gender,
+    BirthDate: r.birth_date,
+    Address: r.address,
+    PhotoURL: r.photo_url,
+    CustomFields: safeParseJson(r.custom_fields),
+    CurrentLevel: isActive ? r.grade_level_id : r.current_level || "Non inscrit",
+    Active: isActive ? "TRUE" : "FALSE",
+    Section: isActive ? r.hist_section : "",
+    SchoolYear: isActive ? r.school_year : "",
+    ActiveHistoryID: isActive ? r.history_id : "",
+    attendance: pct,
+    Attendance: pct,
+    CreatedAt: r.created_at,
+    UpdatedAt: r.updated_at,
+  };
+}
+
+async function expectedTuitionForStudent(conf, level) {
+  const norm = (v) => String(v ?? '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const parse = (v) => { if (v && typeof v === 'object') return v; try { return JSON.parse(String(v || '{}')); } catch { return {}; } };
+  const plans = parse(conf.FIN_PAYMENT_PLANS);
+  const amountFromPlan = (plan) => {
+    if (!plan || typeof plan !== 'object') return null;
+    if (Number(plan.instTotal) > 0) return Number(plan.instTotal);
+    if (plan.monthly && Number(plan.monthly.amount) > 0) return Number(plan.monthly.amount) * Math.max(1, Number(plan.monthly.count) || 1);
+    if (Array.isArray(plan.installments)) { const n = plan.installments.reduce((a,x)=>a+(Number(x?.amount)||0),0); if(n>0)return n; }
+    return null;
+  };
+  const cycle = (() => { const x=norm(level); if(x.includes('mat'))return 'maternelle'; if(x.includes('fond')||x.includes('prima'))return 'fondamental'; if(x.includes('second')||/^ns[1-4]$/.test(x)||x.includes('lycee'))return 'secondaire'; return ''; })();
+  const classKey = 'class_' + level.replace(/\s+/g,'_').toLowerCase();
+  const cycleKey = 'cycle_' + cycle.replace(/\s+/g,'_').toLowerCase();
+  let expected = amountFromPlan(plans[classKey]) ?? amountFromPlan(plans[cycleKey]) ?? amountFromPlan(plans.global);
+  const byClass = parse(conf.TUITION_BY_CLASS);
+  const byCycle = parse(conf.TUITION_BY_CYCLE);
+  if (!(expected > 0) && byClass && typeof byClass === 'object') { const k=Object.keys(byClass).find(k=>norm(k)===norm(level)); if(k) expected=Number(byClass[k])||0; }
+  if (!(expected > 0) && byCycle && typeof byCycle === 'object') { const k=Object.keys(byCycle).find(k=>norm(k)===norm(cycle)); if(k) expected=Number(byCycle[k])||0; }
+  if (!(expected > 0)) expected = Number(conf.TUITION_AMOUNT_GLOBAL || conf.TUITION_AMOUNT || 0) || 0;
+  return expected > 0 ? expected : null;
+}
+
+// ?action=getAllStudents
+// Returns a raw array (not {success,data}) — same contract as
+// getAllStudents_ itself; apiHub's normalizeApiHubResponse wraps arrays
+// into {success:true, data, count} automatically (see src/lib/apiHub.js),
+// same as it does for every other array-returning action.
+export async function getAllStudents(_data, auth, env) {
+  try {
+    const viewer = await loadViewer(env, auth);
+    const orgId = await resolveOrgId(env);
+    const [rows, attendancePctMap] = await Promise.all([
+      fetchStudentsWithHistory(env, orgId),
+      buildAttendancePercentMap(env, orgId),
+    ]);
+    const apiRows = rows.map((r) => studentRowToApi(r, attendancePctMap));
+    const [paymentRows, settingRows, historyRows] = await Promise.all([
+      env.DB.prepare(`SELECT student_id, amount, status FROM payments WHERE org_id=? AND deleted_at IS NULL AND status IN ('PAID','PARTIAL')`).bind(orgId).all(),
+      env.DB.prepare(`SELECT key,value FROM settings`).all(),
+      env.DB.prepare(`SELECT student_id,grade_level_id,updated_at FROM student_history WHERE org_id=? AND status='ACTIVE' ORDER BY updated_at DESC`).bind(orgId).all(),
+    ]);
+    const paidByStudent = {};
+    for (const r of paymentRows.results || []) { const sid=String(r.student_id||'').toUpperCase(); if(sid) paidByStudent[sid]=(paidByStudent[sid]||0)+(Number(r.amount)||0); }
+    const conf = {}; for (const r of settingRows.results || []) { try { conf[r.key]=JSON.parse(r.value); } catch { conf[r.key]=r.value; } }
+    const levelByStudent = {}; for (const r of historyRows.results || []) { const sid=String(r.student_id||'').toUpperCase(); if(sid && levelByStudent[sid]===undefined) levelByStudent[sid]=r.grade_level_id; }
+    for (const row of apiRows) {
+      const due = await expectedTuitionForStudent(conf, levelByStudent[String(row.StudentCode||'').toUpperCase()] || row.CurrentLevel);
+      const paid = paidByStudent[String(row.StudentCode||'').toUpperCase()] || 0;
+      row.paid = due ? Math.min(100, Math.round((paid / due) * 100)) + '%' : '0%';
+    }
+    return viewer ? filterStudents(viewer, apiRows) : apiRows;
+  } catch (e) {
+    // Same "log, don't crash the whole list screen" fallback as the
+    // original's catch(e){return [];}.
+    console.error("[getAllStudents] failed:", e.message);
+    return [];
+  }
+}
+
+// {action: "getStudentById", data: {id|studentId|StudentCode}}
+export async function getStudentById(data, auth, env) {
+  const id = resolveStudentId(data);
+  if (!id) return { success: false, error: "Identifiant élève manquant." };
+  const orgId = await resolveOrgId(env);
+  const guard = auth ? await assertStudentAccess(env, auth, orgId, id) : {allowed:true};
+  if (!guard.allowed) return { success: false, error: guard.error };
+  const rows = await fetchStudentsWithHistory(env, orgId, "AND s.student_code = ?", [id]);
+  if (!rows.length) return { success: false, error: "Élève introuvable: " + id };
+  const attendancePctMap = await buildAttendancePercentMap(env, orgId);
+  return { success: true, data: studentRowToApi(rows[0], attendancePctMap) };
+}
+
+// {action: "searchStudents", data: {query}}
+export async function searchStudents(data, auth, env) {
+  const term = String((data && (data.query || data.term)) || "").toLowerCase().trim();
+  const all = await getAllStudents(data, auth, env);
+  if (!term) return { success: true, data: all };
+  return {
+    success: true,
+    data: all.filter((s) => {
+      let cf = s.CustomFields;
+      if (typeof cf === "string") cf = safeParseJson(cf);
+      const nisu = cf && (cf.NISU ?? cf.nisu ?? cf.Nisu ?? cf.nisuNumber);
+      return (
+        String(s.FirstName || "").toLowerCase().includes(term) ||
+        String(s.LastName || "").toLowerCase().includes(term) ||
+        String(s.StudentCode || "").toLowerCase().includes(term) ||
+        String(nisu || "").toLowerCase().includes(term)
+      );
+    }),
+  };
+}
+
+// ?action=getStudentHistory&studentId=...
+// Returns a raw array (isCurrent flag per row), sorted newest year first
+// — same contract as getStudentHistory_.
+export async function getStudentHistory(data, auth, env) {
+  try {
+    const id = resolveStudentId(data);
+    if (!id) return [];
+    const orgId = await resolveOrgId(env);
+    if (auth?.token) {
+      const guard = await assertStudentAccess(env, auth, orgId, id);
+      if (!guard.allowed) return { success: false, error: guard.error };
+    }
+    const { results } = await env.DB.prepare(
+      `SELECT history_id, school_year, grade_level_id, section, status, drop_reason, drop_date
+       FROM student_history WHERE org_id = ? AND student_id = ?
+       ORDER BY school_year DESC, updated_at DESC`
+    )
+      .bind(orgId, id)
+      .all();
+    return (results || []).map((r) => ({
+      historyId: r.history_id,
+      year: r.school_year || "",
+      level: r.grade_level_id || "",
+      section: r.section || "",
+      status: r.status || "",
+      dropReason: r.drop_reason || "",
+      dropDate: r.drop_date || "",
+      isCurrent: String(r.status || "").toUpperCase() === "ACTIVE",
+    }));
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// Fields Code.gs allows updateStudent_ to write to the 'students' Sheet
+// (mirrors headers.forEach(...) minus the blockedHeaders it always
+// protects — StudentCode/StudentID/CreatedAt — plus FirstName/LastName,
+// which this port never accepts through `updateStudent` regardless of
+// SYSTEM_ID_MODE; see the header disclaimer above for why that's
+// stricter, not a gap).
+const STUDENT_UPDATE_COLUMNS = {
+  phone: "phone",
+  Phone: "phone",
+  gender: "gender",
+  Gender: "gender",
+  birthDate: "birth_date",
+  BirthDate: "birth_date",
+  address: "address",
+  Address: "address",
+  photoUrl: "photo_url",
+  PhotoURL: "photo_url",
+};
+
+// {action: "updateStudent", data: {studentId, data: {...}} | {studentId, ...fields}}
+// Patches demographic fields on 'students', and — when CurrentLevel/
+// Section changes — updates the CURRENT active student_history row in
+// place (or creates a fresh one if none is active), same two-step
+// behavior as updateStudent_.
+export async function updateStudent(payload, auth, env) {
+  try {
+    const studentId = resolveStudentId(payload);
+    const updates = (payload && payload.data) || payload || {};
+    if (!studentId) return { success: false, error: "studentId manquant." };
+    const orgId = await resolveOrgId(env);
+    const guard = auth ? await assertStudentAccess(env, auth, orgId, studentId) : {allowed:true};
+    if (!guard.allowed) return { success: false, error: guard.error };
+
+    const existing = await env.DB.prepare(
+      `SELECT id, current_level, section, version FROM students WHERE org_id = ? AND student_code = ? AND deleted_at IS NULL`
+    )
+      .bind(orgId, studentId)
+      .first();
+    if (!existing) return { success: false, error: "Élève introuvable: " + studentId };
+
+    const setClauses = [];
+    const params = [];
+    for (const key of Object.keys(updates)) {
+      const column = STUDENT_UPDATE_COLUMNS[key];
+      if (column) {
+        setClauses.push(`${column} = ?`);
+        params.push(updates[key]);
+      }
+    }
+
+    const nextLevelRaw =
+      updates.CurrentLevel !== undefined
+        ? updates.CurrentLevel
+        : updates.currentLevel !== undefined
+        ? updates.currentLevel
+        : updates.GradeLevelID !== undefined
+        ? updates.GradeLevelID
+        : updates.gradeLevelId;
+    const nextSectionRaw = updates.Section !== undefined ? updates.Section : updates.section;
+
+    const activeHist = await env.DB.prepare(
+      `SELECT id, history_id, grade_level_id, section FROM student_history
+       WHERE org_id = ? AND student_id = ? AND status = 'ACTIVE' ORDER BY updated_at DESC, rowid DESC LIMIT 1`
+    )
+      .bind(orgId, studentId)
+      .first();
+
+    const currentLevel = activeHist ? activeHist.grade_level_id : existing.current_level || "";
+    const currentSection = activeHist ? activeHist.section : existing.section || "";
+    const nextLevel = nextLevelRaw !== undefined ? String(nextLevelRaw || "").trim() : currentLevel;
+    const nextSection = nextSectionRaw !== undefined ? String(nextSectionRaw || "").trim() : currentSection;
+    const classChanged = nextLevel !== currentLevel || nextSection !== currentSection;
+
+    const ts = new Date().toISOString();
+    if (setClauses.length) {
+      setClauses.push("version = version + 1", "updated_at = ?");
+      params.push(ts, orgId, studentId);
+      await env.DB.prepare(
+        `UPDATE students SET ${setClauses.join(", ")} WHERE org_id = ? AND student_code = ?`
+      )
+        .bind(...params)
+        .run();
+    }
+
+    if (updates.CustomFields && typeof updates.CustomFields === "object") {
+      const row = await env.DB.prepare(`SELECT custom_fields FROM students WHERE org_id = ? AND student_code = ?`)
+        .bind(orgId, studentId)
+        .first();
+      const merged = { ...safeParseJson(row && row.custom_fields), ...updates.CustomFields };
+      await env.DB.prepare(`UPDATE students SET custom_fields = ?, updated_at = ? WHERE org_id = ? AND student_code = ?`)
+        .bind(JSON.stringify(merged), ts, orgId, studentId)
+        .run();
+    }
+
+    if (classChanged) {
+      if (activeHist) {
+        await env.DB.prepare(
+          `UPDATE student_history SET grade_level_id = ?, section = ?, updated_at = ? WHERE id = ?`
+        )
+          .bind(nextLevel, nextSection, ts, activeHist.id)
+          .run();
+      } else {
+        const year = await getActiveAcademicYear(env.DB);
+        const histId = "HIS-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+        await env.DB.prepare(
+          `INSERT INTO student_history (id, history_id, student_id, org_id, school_year, grade_level_id, section, status, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`
+        )
+          .bind(crypto.randomUUID(), histId, studentId, orgId, year, nextLevel || "N/A", nextSection || "A", ts)
+          .run();
+      }
+    }
+
+    await writeAudit(env.DB, {
+      table: "students",
+      rowId: studentId,
+      userId: null,
+      deviceId: updates.deviceId,
+      op: "update",
+      diff: { fields: Object.keys(updates) },
+    });
+
+    return { success: true, message: "Dossier mis a jour: " + studentId };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// {action: "enrollStudent", data: {studentId, schoolYear?, gradeLevelId|level?, section?}}
+// Rejects if the student's LATEST history row is already ACTIVE — same
+// "use reEnrollStudent/dropStudent first" guard as _enrollStudentInternal_.
+// Code.gs holds a script-wide lock here (LockService) since Apps Script
+// has no transactions; D1 statements are already atomic per-request, so
+// no equivalent lock is needed.
+export async function enrollStudent(payload, auth, env) {
+  try {
+    const studentId = String((payload && payload.studentId) || "").trim();
+    if (!studentId) return { success: false, error: "studentId manquant." };
+    const orgId = await resolveOrgId(env);
+
+    let year = String((payload && payload.schoolYear) || "").trim();
+    if (!year) year = await getActiveAcademicYear(env.DB);
+    if (!year || year === "ANNEE_NON_CONFIGUREE") {
+      return { success: false, error: "Annee scolaire non configuree. Definissez ACADEMIC_YEAR dans Parametres." };
+    }
+
+    const latest = await env.DB.prepare(
+      `SELECT status, school_year FROM student_history WHERE org_id = ? AND student_id = ?
+       ORDER BY updated_at DESC, rowid DESC LIMIT 1`
+    )
+      .bind(orgId, studentId)
+      .first();
+    if (latest && String(latest.status).toUpperCase() === "ACTIVE") {
+      return {
+        success: false,
+        error: `Cet eleve est deja inscrit pour ${latest.school_year || "l'annee en cours"}. Utilisez reEnrollStudent ou dropStudent d'abord.`,
+      };
+    }
+
+    const histId = "HIS-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+    const ts = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO student_history (id, history_id, student_id, org_id, school_year, grade_level_id, section, status, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`
+    )
+      .bind(
+        crypto.randomUUID(),
+        histId,
+        studentId,
+        orgId,
+        year,
+        payload.gradeLevelId || payload.level || "N/A",
+        payload.section || "A",
+        ts
+      )
+      .run();
+
+    await writeAudit(env.DB, {
+      table: "student_history",
+      rowId: histId,
+      userId: null,
+      deviceId: payload.deviceId,
+      op: "enroll",
+      diff: { studentId, year, level: payload.gradeLevelId || payload.level || "N/A" },
+    });
+
+    return { success: true, historyId: histId, message: `Inscription creee pour ${studentId} — ${year}` };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// {action: "dropStudent", data: {studentId, dropReason?, dropDate?}}
+// APPENDS a new DROPPED row copying the current one — the original
+// ACTIVE row is never touched, same as dropStudent_'s own comment says.
+export async function dropStudent(payload, auth, env) {
+  try {
+    const studentId = String((payload && payload.studentId) || "").trim();
+    if (!studentId) return { success: false, error: "studentId manquant." };
+    const orgId = await resolveOrgId(env);
+
+    const latest = await env.DB.prepare(
+      `SELECT * FROM student_history WHERE org_id = ? AND student_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1`
+    )
+      .bind(orgId, studentId)
+      .first();
+    if (!latest || String(latest.status).toUpperCase() !== "ACTIVE") {
+      return { success: false, error: "Aucun historique ACTIVE trouve pour " + studentId };
+    }
+
+    const histId = "HIS-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+    const ts = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO student_history (id, history_id, student_id, org_id, school_year, grade_level_id, section, status, drop_reason, drop_date, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'DROPPED', ?, ?, ?)`
+    )
+      .bind(
+        crypto.randomUUID(),
+        histId,
+        studentId,
+        orgId,
+        latest.school_year,
+        latest.grade_level_id,
+        latest.section,
+        payload.dropReason || "",
+        payload.dropDate || ts,
+        ts
+      )
+      .run();
+
+    await writeAudit(env.DB, {
+      table: "student_history",
+      rowId: histId,
+      userId: null,
+      deviceId: payload.deviceId,
+      op: "drop",
+      diff: { studentId, dropReason: payload.dropReason || "N/A" },
+    });
+
+    return { success: true, message: "Eleve marque comme DROPPED: " + studentId };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// {action: "reEnrollStudent", data: {studentId, ...same as enrollStudent}}
+// Rejects if the student's identity doesn't exist, or if their LATEST
+// history row is already ACTIVE — otherwise delegates to enrollStudent,
+// same as reEnrollStudent_.
+export async function reEnrollStudent(payload, auth, env) {
+  try {
+    const studentId = String((payload && payload.studentId) || "").trim();
+    if (!studentId) return { success: false, error: "studentId manquant." };
+    const orgId = await resolveOrgId(env);
+
+    const exists = await env.DB.prepare(
+      `SELECT 1 FROM students WHERE org_id = ? AND student_code = ? AND deleted_at IS NULL`
+    )
+      .bind(orgId, studentId)
+      .first();
+    if (!exists) return { success: false, error: "Identite eleve introuvable: " + studentId };
+
+    const latest = await env.DB.prepare(
+      `SELECT status FROM student_history WHERE org_id = ? AND student_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1`
+    )
+      .bind(orgId, studentId)
+      .first();
+    if (latest && String(latest.status).toUpperCase() === "ACTIVE") {
+      return { success: false, error: "L'eleve est deja ACTIVE. Utilisez dropStudent avant de re-inscrire." };
+    }
+
+    return enrollStudent(payload, auth, env);
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// {action: "updateStudentHistory", data: {historyId, section?, gradeLevelId?, status?}}
+// Patches a specific history row in place — cannot change studentId or
+// historyId, same as updateStudentHistory_.
+export async function updateStudentHistory(payload, auth, env) {
+  try {
+    const historyId = String((payload && payload.historyId) || "").trim();
+    if (!historyId) return { success: false, error: "historyId manquant." };
+    const orgId = await resolveOrgId(env);
+
+    const row = await env.DB.prepare(`SELECT id FROM student_history WHERE org_id = ? AND history_id = ?`)
+      .bind(orgId, historyId)
+      .first();
+    if (!row) return { success: false, error: "HistoryID introuvable: " + historyId };
+
+    const sets = [];
+    const params = [];
+    if (payload.section !== undefined) {
+      sets.push("section = ?");
+      params.push(payload.section);
+    }
+    if (payload.gradeLevelId !== undefined) {
+      sets.push("grade_level_id = ?");
+      params.push(payload.gradeLevelId);
+    }
+    if (payload.status !== undefined) {
+      sets.push("status = ?");
+      params.push(payload.status);
+    }
+    sets.push("updated_at = ?");
+    params.push(new Date().toISOString(), row.id);
+
+    await env.DB.prepare(`UPDATE student_history SET ${sets.join(", ")} WHERE id = ?`)
+      .bind(...params)
+      .run();
+
+    await writeAudit(env.DB, {
+      table: "student_history",
+      rowId: historyId,
+      userId: null,
+      deviceId: payload.deviceId,
+      op: "update",
+      diff: { section: payload.section, level: payload.gradeLevelId, status: payload.status },
+    });
+
+    return { success: true, message: "Historique mis a jour: " + historyId };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// ============================================================
+// getStudentFieldsConfig — port of getStudentFieldsConfig_
+// (Code_gs_background-sync__1_.txt ~line 8660).
+//
+// The original built its field list from two sources: (1) the 'students'
+// Sheet's own header row (arbitrary extra columns a school had added over
+// time) and (2) a saved customization blob in
+// PropertiesService (STUDENT_FORM_CONFIG/STUDENT_FIELDS_CONFIG) holding
+// per-field {enabled, required, label, type} overrides.
+//
+// D1 equivalent, ported not stubbed:
+//  - (1) becomes the real, fixed `students` table columns (SYSTEM_FIELDS
+//    below, unchanged from the original list/labels/locks) PLUS whatever
+//    keys actually show up inside `custom_fields` JSON across this org's
+//    students — the D1 analogue of "extra sheet columns", since custom
+//    per-school fields land in that JSON blob (see schema.sql), not as
+//    new physical columns.
+//  - (2) becomes the `settings` table's STUDENT_FIELDS_CONFIG key (JSON
+//    array), read/written through src/lib/settings.js's getSetting, same
+//    flat-KV pattern every other config value in this port already uses.
+const STUDENT_SYSTEM_FIELDS = [
+  { id: "StudentCode", label: "Code Eleve", type: "text", isSystem: true },
+  { id: "FirstName", label: "Prenom", type: "text", isSystem: true },
+  { id: "LastName", label: "Nom", type: "text", isSystem: true },
+  { id: "Phone", label: "Telephone", type: "tel", isSystem: true },
+  { id: "PhotoURL", label: "Photo", type: "text", isSystem: true },
+  { id: "CurrentLevel", label: "Classe", type: "select", isSystem: true },
+  { id: "Gender", label: "Sexe", type: "select", options: ["Masculin", "Féminin"], isSystem: true },
+  { id: "Address", label: "Adresse", type: "text", isSystem: true },
+  { id: "BirthDate", label: "Date de naissance", type: "date", isSystem: true },
+  { id: "EnrollmentStatus", label: "Statut", type: "text", isSystem: true },
+  { id: "Active", label: "Actif", type: "text", isSystem: true },
+];
+const STUDENT_LOCKED_FIELD_IDS = new Set(STUDENT_SYSTEM_FIELDS.map((f) => f.id));
+
+function inferStudentFieldType(fieldId) {
+  const key = String(fieldId || "").toUpperCase();
+  if (key.includes("DATE") || key === "BIRTHDATE") return "date";
+  if (key.includes("EMAIL")) return "email";
+  if (key.includes("PHONE") || key.includes("TEL")) return "tel";
+  return "text";
+}
+
+// {action: "getStudentFieldsConfig"} — no student-scoped auth needed, same
+// as the original (it describes the form shape, not any one student's data).
+export async function getStudentFieldsConfig(_data, _auth, env) {
+  try {
+    const orgId = await resolveOrgId(env);
+    const savedRaw = await getSetting(env.DB, "STUDENT_FIELDS_CONFIG", "[]");
+    let saved = [];
+    try {
+      saved = JSON.parse(savedRaw) || [];
+    } catch {
+      saved = [];
+    }
+    const getSavedById = (fieldId) =>
+      (saved || []).find((x) => String((x && (x.id || x.key)) || "").trim() === fieldId);
+
+    const fields = STUDENT_SYSTEM_FIELDS.map((sys) => {
+      const s = getSavedById(sys.id);
+      return {
+        ...sys,
+        key: sys.id,
+        enabled: STUDENT_LOCKED_FIELD_IDS.has(sys.id) ? true : s ? !!s.enabled : true,
+        required: STUDENT_LOCKED_FIELD_IDS.has(sys.id) ? true : s ? !!s.required : false,
+        isLocked: STUDENT_LOCKED_FIELD_IDS.has(sys.id),
+      };
+    });
+
+    // Discover custom_fields keys actually in use for this org — the D1
+    // analogue of reading extra Sheet header columns.
+    const { results: cfRows } = await env.DB
+      .prepare(`SELECT custom_fields FROM students WHERE org_id = ? AND deleted_at IS NULL`)
+      .bind(orgId)
+      .all();
+    const discovered = new Set();
+    for (const row of cfRows || []) {
+      try {
+        const obj = JSON.parse(row.custom_fields || "{}");
+        Object.keys(obj || {}).forEach((k) => k && discovered.add(k));
+      } catch {
+        /* malformed custom_fields on one row shouldn't break the whole config screen */
+      }
+    }
+    for (const h of discovered) {
+      if (fields.some((f) => f.id === h)) continue;
+      const s = getSavedById(h);
+      fields.push({
+        id: h,
+        key: h,
+        label: (s && s.label) || h,
+        type: (s && s.type) || inferStudentFieldType(h),
+        enabled: s && s.enabled !== undefined ? !!s.enabled : true,
+        required: s && s.required !== undefined ? !!s.required : false,
+        isSystem: false,
+        isLocked: false,
+      });
+    }
+
+    // Any saved custom field with no matching discovered column yet
+    // (e.g. configured before the first student used it) still shows up,
+    // same as the original's third pass over `saved`.
+    for (const s of saved || []) {
+      const sid = String((s && (s.id || s.key)) || "").trim();
+      if (!sid || fields.some((f) => f.id === sid)) continue;
+      fields.push({
+        id: sid,
+        key: sid,
+        label: String(s.label || sid),
+        type: String(s.type || inferStudentFieldType(sid)),
+        enabled: s.enabled !== undefined ? !!s.enabled : true,
+        required: s.required !== undefined ? !!s.required : false,
+        isSystem: false,
+        isLocked: false,
+      });
+    }
+
+    return { success: true, data: fields, fields };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// ============================================================
+// addNewStudent / resetStudentPin / lookupStudentGlobal — student
+// lifecycle actions distinct from the directory/enrollment ones above
+// (Code.gs ~lines 8206 / 23790 / 8497). Same recipe: real D1 columns,
+// ported logic, verified with a runnable test before calling it done.
+
+// Known 'students' columns addNewStudent's formObj can set directly —
+// the same split KNOWN_KEYS/customFields uses in
+// generatedIdsSync.js's upsertStudentFromGeneratedRow, since both
+// functions port sibling call sites of the SAME Code.gs function
+// (addNewStudent_): that one is the Generated_IDs background import,
+// this one is the school-dossier "add/edit a student" screen action.
+const STUDENT_FORM_COLUMNS = {
+  LastName: "last_name",
+  FirstName: "first_name",
+  Phone: "phone",
+  Gender: "gender",
+  BirthDate: "birth_date",
+  Address: "address",
+  PhotoURL: "photo_url",
+  CurrentLevel: "current_level",
+  Section: "section",
+  EnrollmentStatus: "enrollment_status",
+  GeneratedSource: "generated_source",
+  GeneratedOrgId: "generated_org_id",
+};
+// 'deviceId' isn't a Code.gs sheet field at all — it's this port's own
+// audit-device convention (see writeAudit calls throughout this file)
+// — so it's excluded from the CustomFields overflow rather than being
+// stored as a per-student custom field.
+const STUDENT_FORM_KNOWN_KEYS = new Set([...Object.keys(STUDENT_FORM_COLUMNS), "StudentCode", "Active", "deviceId"]);
+
+// {action: "addNewStudent", data: formObj} — ports addNewStudent_'s
+// identity-row + student_history half (the same slice
+// upsertStudentFromGeneratedRow already ports for the Generated_IDs
+// import path). A StudentCode that already exists for this org is
+// treated as an edit — identity fields NOT present in the payload are
+// left untouched, same "profile resets on every resend" bug fix
+// Code.gs's own comment describes — a new one is inserted.
+//
+// Parent portal auto-provisioning is implemented in the addNewStudent path
+// below using D1 parent_accounts/parent_students. Optional credential
+// credential delivery uses only the PWA push notification channel.
+//   - The SYSTEM_ID_MODE === 'AUTO' branch is ported as written (same
+//     "even an edit-by-resend gets a fresh random code" quirk Code.gs
+//     itself has), not redesigned to be smarter about it.
+export async function addNewStudent(payload, auth, env) {
+  try {
+    const formObj = { ...(payload || {}) };
+    const orgId = await resolveOrgId(env);
+
+    let studentCode = String(formObj.StudentCode || "").trim();
+    const idMode = String((await getSetting(env.DB, "SYSTEM_ID_MODE")) || "").toUpperCase();
+    if (idMode === "AUTO") {
+      const prefix = (await getSetting(env.DB, "SYSTEM_ID_PREFIX")) || "MT";
+      studentCode = prefix + String(1000 + Math.floor(Math.random() * 9000));
+      formObj.StudentCode = studentCode;
+    }
+    if (!studentCode) return { success: false, error: "StudentCode manquant." };
+
+    const existing = await env.DB.prepare(
+      `SELECT id, custom_fields FROM students WHERE org_id = ? AND student_code = ? AND deleted_at IS NULL`
+    )
+      .bind(orgId, studentCode)
+      .first();
+
+    const customFields = {};
+    Object.keys(formObj).forEach((k) => {
+      if (!STUDENT_FORM_KNOWN_KEYS.has(k)) customFields[k] = formObj[k];
+    });
+
+    const ts = new Date().toISOString();
+    const isNew = !existing;
+
+    if (isNew) {
+      const activeVal = String(formObj.Active).toUpperCase() !== "FALSE" ? 1 : 0;
+      await env.DB.prepare(
+        `INSERT INTO students (
+           id, student_code, org_id, last_name, first_name, phone, gender, birth_date,
+           address, photo_url, current_level, section, enrollment_status, active,
+           generated_source, generated_org_id, custom_fields, created_at, version, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`
+      )
+        .bind(
+          crypto.randomUUID(), studentCode, orgId,
+          formObj.LastName || "", formObj.FirstName || "", formObj.Phone || "",
+          formObj.Gender || "", formObj.BirthDate || "", formObj.Address || "",
+          formObj.PhotoURL || "", formObj.CurrentLevel || "", formObj.Section || "A",
+          formObj.EnrollmentStatus || "ACTIVE", activeVal,
+          formObj.GeneratedSource || "", formObj.GeneratedOrgId || "",
+          JSON.stringify(customFields), ts, ts
+        )
+        .run();
+    } else {
+      // Only overwrite a column if the caller actually sent that key —
+      // never blank it because it was omitted from this particular call.
+      const setClauses = [];
+      const params = [];
+      for (const [formKey, column] of Object.entries(STUDENT_FORM_COLUMNS)) {
+        if (formObj[formKey] !== undefined) {
+          setClauses.push(`${column} = ?`);
+          params.push(formObj[formKey]);
+        }
+      }
+      if (formObj.Active !== undefined) {
+        setClauses.push("active = ?");
+        params.push(String(formObj.Active).toUpperCase() !== "FALSE" ? 1 : 0);
+      }
+      let mergedCustom = {};
+      try {
+        mergedCustom = JSON.parse(existing.custom_fields || "{}");
+      } catch {
+        mergedCustom = {};
+      }
+      Object.assign(mergedCustom, customFields);
+      setClauses.push("custom_fields = ?", "version = version + 1", "updated_at = ?");
+      params.push(JSON.stringify(mergedCustom), ts, existing.id);
+      await env.DB.prepare(`UPDATE students SET ${setClauses.join(", ")} WHERE id = ?`)
+        .bind(...params)
+        .run();
+    }
+
+    // Parent-portal auto-provisioning — D1 equivalent of
+    // syncParentAccountForStudent_. A parent phone creates/reuses the
+    // parent account and links the student idempotently. Credentials are
+    // returned only for a newly-created account; delivery can be delegated
+    // to the configured notification webhook without hardcoded providers.
+    let parentAccount = null;
+    const rawParentPhone = formObj.ParentPhone ?? formObj.parentPhone ?? "";
+    const parentPhone = String(rawParentPhone).replace(/\D/g, "");
+    if (parentPhone) {
+      let parent = await env.DB.prepare(`SELECT id,display_name,password_hash FROM parent_accounts WHERE org_id=? AND phone=? AND deleted_at IS NULL LIMIT 1`).bind(orgId,parentPhone).first();
+      let createdParent = false;
+      let generatedPin = "";
+      if (!parent) {
+        const parentId = "PAR-" + crypto.randomUUID().replace(/-/g, "").slice(0,8).toUpperCase();
+        generatedPin = String(Math.floor(100000 + Math.random() * 900000));
+        const displayName = String(formObj.ParentName ?? formObj.parentName ?? "").trim() || `Parent de ${String(formObj.FirstName||"").trim()} ${String(formObj.LastName||"").trim()}`.trim();
+        await env.DB.prepare(`INSERT INTO parent_accounts(id,org_id,phone,password_hash,display_name,active,must_change_password,created_at,updated_at) VALUES(?,?,?,?,?,1,1,?,?)`).bind(parentId,orgId,parentPhone,await hashPin(generatedPin),displayName,ts,ts).run();
+        parent = { id:parentId,display_name:displayName,password_hash:await hashPin(generatedPin) };
+        createdParent = true;
+      }
+      const link = await env.DB.prepare(`SELECT id FROM parent_students WHERE org_id=? AND parent_id=? AND student_id=? AND deleted_at IS NULL LIMIT 1`).bind(orgId,parent.id,studentCode).first();
+      if (!link) {
+        await env.DB.prepare(`INSERT INTO parent_students(id,org_id,parent_id,student_id,student_code,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`).bind("LNK-"+crypto.randomUUID().replace(/-/g,"").slice(0,8).toUpperCase(),orgId,parent.id,studentCode,studentCode,ts,ts).run();
+      }
+      await writeAudit(env.DB,{table:"parent_accounts",rowId:parent.id,userId:null,op:createdParent?"PARENT_ACCOUNT_CREATED":"PARENT_ACCOUNT_LINKED",diff:{studentId:studentCode,phoneLast4:parentPhone.slice(-4)}});
+      parentAccount = { created:createdParent, parentId:parent.id, phone:parentPhone };
+      if (createdParent) {
+        parentAccount.pin = generatedPin;
+        try {
+          const schoolName = String(env.SCHOOL_NAME || "l'établissement");
+          const studentName = `${String(formObj.FirstName||"").trim()} ${String(formObj.LastName||"").trim()}`.trim();
+          const pushId = "PUSH-" + crypto.randomUUID();
+          await env.DB.prepare(`INSERT INTO push_notifications(id,org_id,owner_type,owner_id,title,body,data_json,status,created_at,sent_at,error,deleted_at)
+            VALUES(?,?,?,?,?,?,?,'QUEUED',?,NULL,NULL,NULL)`).bind(
+              pushId, orgId, "parent", parent.id, "Bienvenue sur le portail parent",
+              `Bienvenue sur le portail parent de ${schoolName} pour ${studentName}. Identifiant : ${parentPhone} Code PIN : ${generatedPin}.`,
+              JSON.stringify({channel:"PUSH",kind:"PARENT_CREDENTIALS",studentId:studentCode}), new Date().toISOString()
+          ).run();
+          parentAccount.notificationSent = true;
+          parentAccount.pushId = pushId;
+        } catch { parentAccount.notificationSent = false; }
+      }
+    }
+
+    const currentYear = await getActiveAcademicYear(env.DB);
+    if (currentYear !== "ANNEE_NON_CONFIGUREE") {
+      const activeHist = await env.DB.prepare(
+        `SELECT id, grade_level_id FROM student_history
+         WHERE org_id = ? AND student_id = ? AND status = 'ACTIVE' ORDER BY updated_at DESC, rowid DESC LIMIT 1`
+      )
+        .bind(orgId, studentCode)
+        .first();
+      const newLevel = String(formObj.CurrentLevel || "N/A").trim();
+      if (activeHist) {
+        const currentLevel = String(activeHist.grade_level_id || "").trim();
+        if (formObj.CurrentLevel !== undefined && currentLevel !== newLevel) {
+          await env.DB.prepare(`UPDATE student_history SET grade_level_id = ?, updated_at = ? WHERE id = ?`)
+            .bind(newLevel, ts, activeHist.id)
+            .run();
+        }
+      } else {
+        const histId = "HIS-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+        await env.DB.prepare(
+          `INSERT INTO student_history (id, history_id, student_id, org_id, school_year, grade_level_id, section, status, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`
+        )
+          .bind(crypto.randomUUID(), histId, studentCode, orgId, currentYear, newLevel, formObj.Section || "A", ts)
+          .run();
+      }
+    }
+
+    await writeAudit(env.DB, {
+      table: "students",
+      rowId: studentCode,
+      userId: null,
+      deviceId: formObj.deviceId,
+      op: isNew ? "insert" : "update",
+      diff: { fields: Object.keys(formObj) },
+    });
+
+    return {
+      success: true,
+      studentId: studentCode,
+      message: isNew ? "Inscription complete" : "Profil mis a jour",
+      parentAccount,
+    };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+function normalizeScopeToken(value) {
+  return String(value || "").toUpperCase().trim().replace(/[^A-Z0-9]/g, "");
+}
+
+// {action: "resetStudentPin", data: {studentId|studentCode|id}} — ports
+// resetStudentPin_: clears the student's parent-portal PIN (pin_hash)
+// so the next login re-collects it via the registered parent phone.
+// Same tolerant lookup as the original: exact code, normalized-token
+// match, or a digit-suffix match (handles a caller passing a
+// shorter/longer legacy ID shape for the same student).
+export async function resetStudentPin(payload, auth, env) {
+  try {
+    const studentId = String((payload && (payload.studentId || payload.studentCode || payload.id)) || "").trim();
+    if (!studentId) return { success: false, error: "studentId manquant." };
+    const orgId = await resolveOrgId(env);
+
+    const targetNorm = normalizeScopeToken(studentId);
+    const targetDigits = studentId.replace(/\D/g, "");
+
+    const { results } = await env.DB.prepare(
+      `SELECT student_code FROM students WHERE org_id = ? AND deleted_at IS NULL`
+    )
+      .bind(orgId)
+      .all();
+
+    let matchedCode = null;
+    for (const row of results || []) {
+      const rowCode = String(row.student_code || "").trim();
+      if (!rowCode) continue;
+      const rowNorm = normalizeScopeToken(rowCode);
+      const rowDigits = rowCode.replace(/\D/g, "");
+      const idMatch =
+        rowCode === studentId ||
+        rowNorm === targetNorm ||
+        (targetDigits && rowDigits && (rowDigits.endsWith(targetDigits) || targetDigits.endsWith(rowDigits)));
+      if (idMatch) {
+        matchedCode = rowCode;
+        break;
+      }
+    }
+    if (!matchedCode) return { success: false, message: "Élève introuvable." };
+
+    await env.DB.prepare(
+      `UPDATE students SET pin_hash = NULL, version = version + 1, updated_at = ? WHERE org_id = ? AND student_code = ?`
+    )
+      .bind(new Date().toISOString(), orgId, matchedCode)
+      .run();
+
+    await writeAudit(env.DB, {
+      table: "students",
+      rowId: matchedCode,
+      userId: null,
+      deviceId: payload && payload.deviceId,
+      op: "reset_pin",
+      diff: { message: "PIN réinitialisé" },
+    });
+
+    return {
+      success: true,
+      studentCode: matchedCode,
+      message: "PIN réinitialisé. Prochaine connexion avec le téléphone parent enregistré.",
+    };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+function normalizeLegacyId(value) {
+  return String(value || "").toUpperCase().trim().replace(/[^A-Z0-9]/g, "");
+}
+
+function buildLegacyCandidates(value) {
+  const base = String(value || "").toUpperCase().trim();
+  const compact = normalizeLegacyId(base);
+  const set = {};
+  [base, compact].forEach((v) => {
+    if (v) set[v] = true;
+  });
+  if (/^MT[0-9]+$/.test(compact)) set["MT-" + compact.slice(2)] = true;
+  if (/^MT-[0-9]+$/.test(base)) set[base.replace("-", "")] = true;
+  return Object.keys(set);
+}
+
+// {action: "lookupStudentGlobal", data: id|{id}} — ports
+// lookupStudentGlobal_: resolves a student code against the shared
+// Generated_IDs Sheet (the same external registration source
+// generatedIdsSync.js reads), scoped to this school's ORG_ID, with the
+// same legacy-ID-shape tolerance (MT1234 <-> MT-1234) and
+// inactive-status rejection as the original.
+//
+// Deliberately NOT ported: the CacheService-backed lookup cache
+// (_safeCacheGetData_/_safeCachePut_ — 600s on a hit, 120s on a miss).
+// Every call here hits the Sheets API live instead. Add a KV- or
+// sync_stamps-backed cache back in if Sheets API rate limits become a
+// real problem in production; omitted here to keep this pass focused
+// on correctness first, same tradeoff noted for other pieces of this
+// port.
+// `deps.fetchSheetValues` is injectable for tests
+// (test/run-student-lifecycle-test.mjs uses the same
+// test/fake-sheets-api.js fixture generatedIdsSync's test does) — apiHub
+// itself only ever calls this with (data, auth, env), so the default
+// (the real Sheets API call) is what production always uses.
+export async function lookupStudentGlobal(payload, auth, env, deps = {}) {
+  const fetchValues = deps.fetchSheetValues || fetchSheetValues;
+  try {
+    const target = String(
+      typeof payload === "string" ? payload : (payload && (payload.id || payload.studentId)) || ""
+    )
+      .trim()
+      .toUpperCase();
+    if (!target) return { success: false, found: false, message: "Identifiant manquant." };
+
+    const spreadsheetId = env.MASTER_AUTH_ID;
+    if (!spreadsheetId) return { success: false, found: false, message: "MASTER_AUTH_ID non configuré." };
+
+    const generatedData = await fetchValues(env, spreadsheetId, "Generated_IDs");
+    if (!generatedData || generatedData.length < 2) {
+      return { success: false, found: false, message: "Generated_IDs introuvable." };
+    }
+
+    const headers = generatedData[0].map((h) =>
+      String(h || "")
+        .toUpperCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, "")
+    );
+    const iId = headers.indexOf("ID");
+    const iFn = headers.indexOf("PRENOM");
+    const iLn = headers.indexOf("NOM");
+    const iPhoto = headers.indexOf("PHOTOURL");
+    const iOrg = headers.indexOf("ORGID");
+    const iStatus = headers.indexOf("STATUS");
+    if (iId === -1) return { success: false, found: false, message: "Colonne ID manquante." };
+
+    const normalizedCandidates = buildLegacyCandidates(target).map(normalizeLegacyId).filter(Boolean);
+    const row = generatedData.slice(1).find((r) => normalizedCandidates.includes(normalizeLegacyId(r[iId])));
+    if (!row) return { success: false, found: false, message: "Identifiant non certifié pour cet établissement." };
+
+    let orgId = "";
+    try {
+      orgId = await resolveOrgId(env);
+    } catch {
+      orgId = "";
+    }
+    const rowOrgId = iOrg !== -1 ? String(row[iOrg] || "").trim() : "";
+    if (rowOrgId && orgId && rowOrgId !== orgId) {
+      return {
+        success: false,
+        found: false,
+        denied: true,
+        message: "Ce matricule appartient à un autre établissement.",
+      };
+    }
+
+    if (iStatus !== -1) {
+      const status = String(row[iStatus] || "").trim().toUpperCase();
+      if (status && /INACTIF|INACTIVE|SUSPENDU|SUSPENDED|BLOCKED|BLOQUE|DISABLED|FALSE|ARCHIVED/.test(status)) {
+        return { success: false, found: false, message: "Ce matricule n'est plus actif." };
+      }
+    }
+
+    const photo = iPhoto !== -1 ? normalizePhotoUrl(row[iPhoto]) : "";
+    const firstName = iFn !== -1 ? String(row[iFn] || "").trim() : "";
+    const lastName = iLn !== -1 ? String(row[iLn] || "").trim() : "";
+    const matchedId = String(row[iId] || "").trim();
+    const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+
+    if (auth && auth.token) {
+      const guard = await assertStudentAccess(env, auth, orgId, matchedId);
+      if (!guard.allowed) return { success: false, found: false, message: guard.error || "Accès refusé." };

@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS exams (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, title TEXT NOT NULL, subject TEXT, description TEXT, status TEXT NOT NULL DEFAULT 'DRAFT', cycle TEXT, classes_csv TEXT, students_csv TEXT, settings_json TEXT NOT NULL DEFAULT '{}', questions_json TEXT NOT NULL DEFAULT '[]', created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1, deleted_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_exams_org_updated ON exams(org_id,updated_at);
+CREATE INDEX IF NOT EXISTS idx_exams_org_status ON exams(org_id,status);
+CREATE TABLE IF NOT EXISTS exam_submissions (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, exam_id TEXT NOT NULL, student_id TEXT NOT NULL, student_name TEXT, attempt INTEGER NOT NULL DEFAULT 1, started_at TEXT NOT NULL, submitted_at TEXT, status TEXT NOT NULL DEFAULT 'IN_PROGRESS', answers_json TEXT NOT NULL DEFAULT '[]', grades_json TEXT NOT NULL DEFAULT '{}', auto_score REAL, manual_score REAL, score REAL, max_score REAL, feedback TEXT, updated_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')), version INTEGER NOT NULL DEFAULT 1, deleted_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_exam_sub_org_exam ON exam_submissions(org_id,exam_id);
+CREATE INDEX IF NOT EXISTS idx_exam_sub_org_student ON exam_submissions(org_id,student_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_sub_attempt ON exam_submissions(org_id,exam_id,student_id,attempt);

@@ -1,0 +1,3 @@
+ALTER TABLE orgs ADD COLUMN provisioning_status TEXT NOT NULL DEFAULT 'PENDING_PROVISIONING';
+ALTER TABLE orgs ADD COLUMN provisioning_error TEXT;
+ALTER TABLE orgs ADD COLUMN provisioned_at TEXT;

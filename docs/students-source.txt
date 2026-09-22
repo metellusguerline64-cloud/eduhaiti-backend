@@ -1,0 +1,1246 @@
+    return { success: false, error: e.message, logs: logs };
+  } finally {
+    try { lock.releaseLock(); } catch(_) {}
+  }
+}
+
+function getAllStudents_(auth) {
+  try {
+    syncAssignedStudentsFromGeneratedIds_();
+    const viewer = auth ? getViewerInfo_(auth) : null;
+    const ss = getSS_();
+    const attendancePctMap = _buildStudentAttendancePercentMap_(ss);
+    const sh = ss.getSheetByName('students');
+    if (!sh || sh.getLastRow() < 2) return [];
+    const data = sh.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).trim());
+    const tz   = Session.getScriptTimeZone();
+    const histMap = _buildActiveHistoryMap(ss);
+    const rows = data.slice(1).filter(r => r[0]).map(r => {
+      const obj = {};
+      h.forEach((k,i) => { obj[k] = r[i] instanceof Date ? Utilities.formatDate(r[i],tz,'yyyy-MM-dd') : r[i]; });
+      if (typeof obj.CustomFields === 'string' && obj.CustomFields.startsWith('{')) {
+        try { obj.CustomFields = JSON.parse(obj.CustomFields); } catch(e) {}
+      }
+      const hist = histMap[String(r[0]).toUpperCase().trim()];
+      obj.CurrentLevel    = hist ? hist.level     : (obj.CurrentLevel || 'Non inscrit');
+      obj.Active          = hist ? 'TRUE'         : 'FALSE';
+      obj.Section         = hist ? hist.section   : '';
+      obj.SchoolYear      = hist ? hist.year       : '';
+      obj.ActiveHistoryID = hist ? hist.historyId  : '';
+      const canonicalId = String(obj.StudentCode || obj.StudentID || '').trim();
+      if (canonicalId) {
+        if (!obj.studentId) obj.studentId = canonicalId;
+        if (!obj.id) obj.id = canonicalId;
+        if (!obj.StudentID) obj.StudentID = canonicalId;
+        const pct = Number(attendancePctMap[String(canonicalId).toUpperCase().trim()] || 0);
+        obj.attendance = pct;
+        obj.Attendance = pct;
+      }
+      return obj;
+    });
+
+    // Enrich each student with paid% using the configured tuition amount
+    // so the frontend list shows accurate payment status from first load.
+    try {
+      const confForPaid = getSaaSSettings_(auth);
+      const confPaidData = confForPaid && confForPaid.success && confForPaid.data ? confForPaid.data : {};
+      const paidMap = _buildStudentPaidPercentMap_(ss, confPaidData);
+      rows.forEach(function(row) {
+        const sid = String(row.id || row.StudentCode || '').trim().toUpperCase();
+        if (sid && paidMap[sid] !== undefined) {
+          row.paid = paidMap[sid] + '%';
+        } else if (!row.paid) {
+          row.paid = '0%';
+        }
+      });
+    } catch (_paidErr) {
+      console.warn('[getAllStudents_] paid% enrichment failed:', _paidErr.message);
+    }
+
+    // BUG FIX: row-level scoping (filterStudentsByViewerScope_) only decided
+    // WHICH students a restricted viewer may see — it returned the full,
+    // unredacted row for every student that passed. A viewer holding only
+    // e.g. pt_edit_grades + pt_view_photo received parents' names, phone
+    // numbers, emails, home address, NISU, etc. on every allowed row even
+    // though they hold none of the permissions meant to expose that data.
+    // _redactStudentListForViewer_ strips fields the viewer hasn't been
+    // granted (see its definition, near filterStudentsByViewerScope_) —
+    // it's a no-op for master/godmode/full-dossier viewers.
+    const scoped = viewer && viewer.success ? filterStudentsByViewerScope_(rows, viewer) : rows;
+    return (viewer && viewer.success) ? _redactStudentListForViewer_(scoped, viewer) : scoped;
+  } catch(e) {
+    // BUG FIX (diagnostic): this used to be a fully silent `catch(e){return [];}`.
+    // Any failure here (sheet lookup, _buildActiveHistoryMap, getViewerInfo_,
+    // syncAssignedStudentsFromGeneratedIds_, etc.) silently produced an empty
+    // student list with zero trace — the exact same class of bug fixed
+    // upstream in _buildServerAiContext_, just one call deeper, which is why
+    // that earlier fix didn't surface it. Now logs to Executions and stashes
+    // the message on a module-level var so callers that care (like the AI
+    // snapshot builder) can retrieve it without changing this function's
+    // return signature for its many other callers.
+    try { console.error('[getAllStudents_] failed: ' + ((e && e.stack) || e)); } catch (_logErr) {}
+    try { _LAST_GET_ALL_STUDENTS_ERROR_ = String((e && e.message) || e || 'unknown error'); } catch (_) {}
+    return [];
+  }
+}
+var _LAST_GET_ALL_STUDENTS_ERROR_ = '';
+// Set just before calling _buildAiFullSystemSnapshot_ when the user's message
+// concerns promotion — read by that function to decide whether to run
+// getPromotionDecision_() per student (avoids the cost on every AI turn).
+var _AI_SNAPSHOT_WANTS_PROMOTIONS_ = false;
+
+function getStudentById_(data, auth) {
+  const id = String(typeof data === 'string' ? data : (data && (data.id || data.studentId || data.StudentCode) || '')).trim();
+  if (!id) return { success: false, error: 'Identifiant élève manquant.' };
+  const all = getAllStudents_(auth);
+  const student = all.find(s =>
+    String(s.StudentCode || '').trim() === id ||
+    String(s.id         || '').trim() === id ||
+    String(s.studentId  || '').trim() === id
+  );
+  if (!student) return { success: false, error: 'Élève introuvable: ' + id };
+  return { success: true, data: student };
+}
+
+function _getLatestHistoryRow_(data, normHeaders, studentId) {
+  const iSid = normHeaders.indexOf('STUDENTID');
+  let latest = null;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][iSid]).trim().toUpperCase() === studentId.trim().toUpperCase()) {
+      latest = data[i];
+    }
+  }
+  return latest;          // null  ➜  no history at all
+}
+ 
+// ── ACTIVE HISTORY MAP (used by attendance, grades, finance) ─
+/**
+ * Replace the existing _buildActiveHistoryMap.
+ * Key change: only marks a student as active when their LATEST
+ * row (not just any row) has STATUS = 'ACTIVE'.
+ */
+function _buildActiveHistoryMap(ss) {
+  const cacheKey = 'ACTIVE_HISTORY_CACHE_' + ss.getId();
+  const cached = CacheService.getScriptCache().get(cacheKey);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      if (parsed._timestamp && (Date.now() - parsed._timestamp) < 1500000) {
+        if (parsed._data) return parsed._data;
+        const map = { ...parsed };
+        delete map._timestamp;
+        return map;
+      }
+    } catch(e) {}
+  }
+ 
+  const map = {};
+  try {
+    const sh = ss.getSheetByName('studenthistory');
+    if (!sh || sh.getLastRow() < 2) return map;
+    const data = sh.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).toUpperCase().replace(/\s/g,''));
+    const iId   = h.indexOf('HISTORYID');
+    const iSid  = h.indexOf('STUDENTID');
+    const iYear = h.indexOf('SCHOOLYEAR');
+    const iLvl  = h.indexOf('GRADELEVELID');
+    const iSec  = h.indexOf('SECTION');
+    const iStat = h.indexOf('STATUS');
+ 
+    // Collect LATEST row per student (last occurrence wins — append-only)
+    const latestRows = {};
+    data.slice(1).forEach(r => {
+      const sid = String(r[iSid]).toUpperCase().trim();
+      if (sid) latestRows[sid] = r;
+    });
+ 
+    // Only populate the map when the latest row is ACTIVE
+    Object.entries(latestRows).forEach(([sid, r]) => {
+      if (String(r[iStat]).toUpperCase() === 'ACTIVE') {
+        map[sid] = {
+          historyId: r[iId],
+          level:     r[iLvl],
+          section:   r[iSec],
+          year:      r[iYear]
+        };
+      }
+    });
+  } catch(e) {}
+ 
+  _safeCachePut(cacheKey, JSON.stringify(map), 1800);
+  return map;
+}
+
+function _normalizeAttendanceStatusToken_(raw) {
+  const status = String(raw || '').trim().toUpperCase();
+  if (status === 'RETARD' || status === 'LATE' || status === 'R') return 'LATE';
+  if (status === 'ABSENT' || status === 'A') return 'ABSENT';
+  if (status === 'PRESENT' || status === 'P' || status === 'ON_TIME' || status === 'ONTIME') return 'PRESENT';
+  return status || 'PRESENT';
+}
+
+/**
+ * Builds a map of studentId → paid% based on Finance sheet + configured tuition.
+ * Used by getAllStudents_ to enrich the student list with accurate payment status.
+ */
+function _buildStudentPaidPercentMap_(ssInput, conf) {
+  const ss = ssInput || getSS_();
+  const map = {};
+  try {
+    const sh = ss.getSheetByName('Finance');
+    if (!sh || sh.getLastRow() < 2) return map;
+    const data = sh.getDataRange().getValues();
+    const h = data[0].map(function(x){ return String(x||'').trim(); });
+    const iSid = h.indexOf('StudentID');
+    const iAmt = h.indexOf('Amount');
+    const iDue = h.indexOf('AmountDue');
+    const iTotDue = h.indexOf('TotalDue');
+    if (iSid === -1 || iAmt === -1) return map;
+
+    const paidBySid = {};
+    const dueBySid  = {};
+    data.slice(1).forEach(function(r) {
+      const sid = String(r[iSid] || '').trim().toUpperCase();
+      if (!sid) return;
+      const amt = parseFloat(r[iAmt] || 0) || 0;
+      const rawDue = parseFloat((iDue >= 0 ? r[iDue] : 0) || (iTotDue >= 0 ? r[iTotDue] : 0) || 0);
+      const due = rawDue > 0 ? rawDue : 0;
+      paidBySid[sid] = (paidBySid[sid] || 0) + amt;
+      if (due > (dueBySid[sid] || 0)) dueBySid[sid] = due;
+    });
+
+    // Configured tuition takes precedence over per-row AmountDue
+    const configuredTuition = parseFloat(
+      (conf && (conf.TUITION_AMOUNT_GLOBAL || conf.TUITION_AMOUNT)) || 0
+    ) || 0;
+
+    Object.keys(paidBySid).forEach(function(sid) {
+      const paid = paidBySid[sid] || 0;
+      const due  = configuredTuition > 0 ? configuredTuition
+                 : (dueBySid[sid] > 0   ? dueBySid[sid]
+                 : paid);
+      map[sid] = due > 0 ? Math.min(100, Math.round((paid / due) * 100)) : 0;
+    });
+  } catch(_e) {}
+  return map;
+}
+
+function _buildStudentAttendancePercentMap_(ssInput) {
+  const ss = ssInput || getSS_();
+  const cacheKey = 'STUDENT_ATTENDANCE_PCT_' + ss.getId();
+  const cached = _safeCacheGetData_(cacheKey);
+  if (cached && typeof cached === 'object') return cached;
+
+  const map = {};
+  try {
+    const sh = ss.getSheetByName('attendance');
+    if (!sh || sh.getLastRow() < 2) {
+      _safeCachePut(cacheKey, JSON.stringify(map), 900);
+      return map;
+    }
+
+    const data = sh.getDataRange().getValues();
+    const headers = data[0].map(function(x) { return String(x || '').trim().toUpperCase(); });
+    const iSid = headers.findIndex(function(h) {
+      return ['STUDENTID','STUDENTCODE','STUDENT_ID','STUDENT_CODE'].indexOf(h) !== -1;
+    });
+    const iStatus = headers.findIndex(function(h) { return h === 'STATUS'; });
+    if (iSid === -1 || iStatus === -1) {
+      _safeCachePut(cacheKey, JSON.stringify(map), 900);
+      return map;
+    }
+
+    // Filter by current academic year to avoid stale all-time rates
+    let currentYear = '';
+    try {
+      const confForAtt = getSaaSSettings_(null);
+      const confData = confForAtt && confForAtt.success && confForAtt.data ? confForAtt.data : {};
+      currentYear = String(confData.ACADEMIC_YEAR || confData.CURRENT_ACADEMIC_YEAR || '').trim();
+    } catch(_yearErr) {}
+
+    // Find date column index
+    const iDate = headers.findIndex(function(h) {
+      return ['DATE','ATTENDANCE_DATE','RECORD_DATE'].indexOf(h) !== -1;
+    });
+
+    const counts = {};
+    data.slice(1).forEach(function(r) {
+      const sid = String(r[iSid] || '').trim().toUpperCase();
+      if (!sid) return;
+
+      // Year filter: if we know the academic year (e.g. "2026-2027"),
+      // only count records whose date falls within that school year range.
+      if (currentYear && iDate !== -1) {
+        const rawDate = r[iDate];
+        let dateStr = '';
+        if (rawDate instanceof Date) {
+          dateStr = Utilities.formatDate(rawDate, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+        } else {
+          dateStr = String(rawDate || '').trim().slice(0, 10);
+        }
+        if (dateStr) {
+          // Academic year "2026-2027" covers Aug 2026 – Jul 2027
+          const parts = currentYear.split('-');
+          if (parts.length === 2) {
+            const yearStart = parts[0].trim();
+            const yearEnd   = parts[1].trim();
+            const dateYear = dateStr.slice(0, 4);
+            const dateMonth = parseInt(dateStr.slice(5, 7), 10);
+            // School year: Sep(9) of yearStart to Aug(8) of yearEnd
+            const inYearStart = dateYear === yearStart && dateMonth >= 8;
+            const inYearEnd   = dateYear === yearEnd   && dateMonth <= 8;
+            const inMiddle    = parseInt(dateYear, 10) > parseInt(yearStart, 10) &&
+                                parseInt(dateYear, 10) < parseInt(yearEnd, 10);
+            if (!inYearStart && !inYearEnd && !inMiddle) return;
+          }
+        }
+      }
+
+      const token = _normalizeAttendanceStatusToken_(r[iStatus]);
+      if (!counts[sid]) counts[sid] = { presentLike: 0, absent: 0 };
+      if (token === 'ABSENT') counts[sid].absent += 1;
+      else if (token === 'PRESENT' || token === 'LATE') counts[sid].presentLike += 1;
+      // UNKNOWN / EXCUSED → skip (neutral)
+    });
+
+    Object.keys(counts).forEach(function(sid) {
+      const c = counts[sid] || { presentLike: 0, absent: 0 };
+      const total = Number(c.presentLike || 0) + Number(c.absent || 0);
+      map[sid] = total > 0 ? Math.round((Number(c.presentLike || 0) / total) * 100) : 0;
+    });
+  } catch (_err) {}
+
+  _safeCachePut(cacheKey, JSON.stringify(map), 900);
+  return map;
+}
+function addNewStudent_(formObj) {
+  const lock = LockService.getScriptLock();
+  let studentCode = formObj.StudentCode;
+  try {
+    lock.waitLock(10000);
+    const ss   = getSS_();
+    const conf = getSaaSSettings_().data;
+    if (conf.SYSTEM_ID_MODE === 'AUTO') {
+      studentCode = (conf.SYSTEM_ID_PREFIX || 'MT') + Math.floor(1000 + Math.random()*9000);
+      formObj.StudentCode = studentCode;
+    }
+    if (!studentCode) throw new Error('StudentCode manquant.');
+    const sh      = ss.getSheetByName('students');
+    const data    = sh.getDataRange().getValues();
+    const headers = data[0].map(x => String(x).trim());
+    const iCode   = headers.indexOf('StudentCode');
+    let   rowIdx  = -1;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][iCode]).trim() === String(studentCode).trim()) { rowIdx = i+1; break; }
+    }
+    const knownKeys = new Set(headers);
+    const customFields = {};
+    Object.keys(formObj).forEach(k => { if (!knownKeys.has(k) && k !== 'CurrentLevel' && k !== 'Section') customFields[k] = formObj[k]; });
+    const identityRow = headers.map(h => {
+      if (h === 'CustomFields') return JSON.stringify(customFields);
+      if (h === 'UpdatedAt')    return new Date();
+      if (h === 'CreatedAt')    return rowIdx !== -1 ? data[rowIdx-1][headers.indexOf('CreatedAt')] : new Date();
+      if (formObj[h] !== undefined) return formObj[h];
+      // FIX: previously fell through to '' here, which meant any header not
+      // present in formObj (e.g. Email, ParentName, or anything edited later
+      // via the student dossier) got blanked out on every update — not just
+      // left untouched. When updating an existing row, keep whatever is
+      // already in the sheet for fields the caller didn't send.
+      return rowIdx !== -1 ? data[rowIdx-1][headers.indexOf(h)] : '';
+    });
+    if (rowIdx !== -1) sh.getRange(rowIdx,1,1,headers.length).setValues([identityRow]);
+    else sh.appendRow(identityRow);
+    // Auto-provision/link a parent portal account — ONLY for genuinely
+    // new students (rowIdx === -1). Updating an existing student must
+    // never regenerate credentials or re-send a WhatsApp message.
+    let parentProvisionResult = null;
+    if (rowIdx === -1) {
+      parentProvisionResult = syncParentAccountForStudent_(studentCode, formObj);
+      if (parentProvisionResult && parentProvisionResult.created && parentProvisionResult.pin) {
+        const deliveryResult = deliverParentCredentials_(
+          parentProvisionResult.phone,
+          parentProvisionResult.pin,
+          (formObj.FirstName || '') + ' ' + (formObj.LastName || '')
+        );
+        parentProvisionResult.whatsappSent = !!(deliveryResult && deliveryResult.sent);
+      }
+    }
+    const currentYear = getActiveAcademicYear_();
+    if (currentYear !== 'ANNEE_NON_CONFIGUREE') {
+      const shHist  = ss.getSheetByName('studenthistory');
+      const hData   = shHist.getDataRange().getValues();
+      const hH      = hData[0];
+      const iSid    = hH.indexOf('StudentID');
+      const iYr     = hH.indexOf('SchoolYear');
+      const iLvl    = hH.indexOf('GradeLevelID');
+      const iStat   = hH.indexOf('Status');
+      const iUpd    = hH.indexOf('UpdatedAt');
+      const existActive = hData.slice(1).find(r =>
+        String(r[iSid]).trim() === String(studentCode).trim() &&
+        String(r[iStat]).toUpperCase() === 'ACTIVE'
+      );
+      if (existActive) {
+        // Update the GradeLevelID if different
+        const currentLevel = String(existActive[iLvl] || '').trim();
+        const newLevel = String(formObj.CurrentLevel || 'N/A').trim();
+        if (currentLevel !== newLevel) {
+        const rowIndex = hData.indexOf(existActive) + 1;
+          // PERF FIX: batch into one setValues() call
+          const updHRow = existActive.slice();
+          updHRow[iLvl] = newLevel;
+          if (iUpd !== -1) updHRow[iUpd] = new Date();
+          shHist.getRange(rowIndex, 1, 1, updHRow.length).setValues([updHRow]);
+        }
+      } else {
+        const histID = 'HIS-' + Utilities.getUuid().substring(0,8);
+        const histRow = hH.map(hdr => {
+          switch(hdr) {
+            case 'HistoryID':    return histID;
+            case 'StudentID':    return studentCode;
+            case 'SchoolYear':   return currentYear;
+            case 'GradeLevelID': return formObj.CurrentLevel || 'N/A';
+            case 'Section':      return formObj.Section || 'A';
+            case 'Status':       return 'ACTIVE';
+            case 'Timestamp':
+            case 'UpdatedAt':    return new Date();
+            default:             return '';
+          }
+        });
+        shHist.appendRow(histRow);
+      }
+    }
+    writeAuditLog_('ADD_STUDENT', studentCode, rowIdx !== -1 ? 'updated' : 'created', 'p_dossier');
+    return { success:true, studentId:studentCode, message: rowIdx !== -1 ? 'Profil mis a jour' : 'Inscription complete', parentAccount: parentProvisionResult };
+  } catch(e) {
+    return { success:false, error:e.message };
+  } finally { lock.releaseLock(); }
+}
+
+function updateStudent_(payload, auth) {
+  try {
+    const studentId = resolveStudentId_(payload);
+    const updates   = payload.data || payload;
+    if (!studentId) return { success:false, error:'studentId manquant.' };
+    const ss      = getSS_();
+    const conf    = getSaaSSettings_().data || {};
+    const idMode  = String(conf.SYSTEM_ID_MODE || '').toUpperCase();
+    const lockIdentity = idMode === 'AUTO' || idMode === 'COMPANY' || idMode === 'COMPANYMODE';
+    const sh      = ss.getSheetByName('students');
+    const data    = sh.getDataRange().getValues();
+    const headers = data[0].map(x => String(x).trim());
+    const iCode   = headers.findIndex(h => ['StudentCode','StudentID'].includes(h));
+    if (iCode === -1) return { success:false, error:'Colonne StudentCode introuvable.' };
+    let rowIdx = -1;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][iCode]).trim() === String(studentId).trim()) { rowIdx = i; break; }
+    }
+    if (rowIdx === -1) return { success:false, error:'Élève introuvable: ' + studentId };
+
+    const iCurrentLevel = headers.indexOf('CurrentLevel');
+    const iSection = headers.indexOf('Section');
+    const currentLevel = iCurrentLevel !== -1 ? String(data[rowIdx][iCurrentLevel] || '').trim() : '';
+    const currentSection = iSection !== -1 ? String(data[rowIdx][iSection] || '').trim() : '';
+    const nextLevelRaw = updates.CurrentLevel !== undefined ? updates.CurrentLevel
+      : (updates.currentLevel !== undefined ? updates.currentLevel
+      : (updates.GradeLevelID !== undefined ? updates.GradeLevelID : updates.gradeLevelId));
+    const nextSectionRaw = updates.Section !== undefined ? updates.Section : updates.section;
+    const nextLevel = nextLevelRaw !== undefined ? String(nextLevelRaw || '').trim() : currentLevel;
+    const nextSection = nextSectionRaw !== undefined ? String(nextSectionRaw || '').trim() : currentSection;
+    const classChanged = nextLevel !== currentLevel || nextSection !== currentSection;
+
+    if (lockIdentity) {
+      const iFirst = headers.indexOf('FirstName');
+      const iLast = headers.indexOf('LastName');
+      const currentFirst = iFirst !== -1 ? String(data[rowIdx][iFirst] || '').trim() : '';
+      const currentLast = iLast !== -1 ? String(data[rowIdx][iLast] || '').trim() : '';
+      const currentCode = String(data[rowIdx][iCode] || '').trim();
+
+      const idCandidates = [updates.StudentCode, updates.StudentID, updates.id, updates.studentId]
+        .filter(v => v !== undefined);
+      const hasIdEditIntent = idCandidates.some(v => String(v).trim() !== currentCode);
+      const hasNameEditIntent = updates.FirstName !== undefined || updates.LastName !== undefined || updates.firstName !== undefined || updates.lastName !== undefined;
+      const nextFirst = updates.FirstName !== undefined ? String(updates.FirstName || '').trim()
+        : (updates.firstName !== undefined ? String(updates.firstName || '').trim() : currentFirst);
+      const nextLast = updates.LastName !== undefined ? String(updates.LastName || '').trim()
+        : (updates.lastName !== undefined ? String(updates.lastName || '').trim() : currentLast);
+
+      if (hasIdEditIntent || (hasNameEditIntent && (nextFirst !== currentFirst || nextLast !== currentLast))) {
+        return {
+          success:false,
+          error:'Modification du nom et de l\'identifiant élève interdite lorsque SYSTEM_ID_MODE est COMPANY/AUTO.'
+        };
+      }
+    }
+
+    // PERF FIX: build the full updated row once and write it in a single
+    // setValues() call instead of one setValue() per column. Each setValue()
+    // is a separate Sheets API round-trip.
+    const updatedStudentRow = data[rowIdx].slice();
+    const blockedHeaders = { StudentCode:true, StudentID:true, CreatedAt:true };
+    if (lockIdentity) {
+      blockedHeaders.FirstName = true;
+      blockedHeaders.LastName = true;
+    }
+    headers.forEach((h, col) => {
+      if (updates[h] !== undefined && !blockedHeaders[h])
+        updatedStudentRow[col] = updates[h];
+    });
+    const iUpdated = headers.indexOf('UpdatedAt');
+    if (iUpdated !== -1) updatedStudentRow[iUpdated] = new Date();
+    if (updates.CustomFields && typeof updates.CustomFields === 'object') {
+      const iCF = headers.indexOf('CustomFields');
+      if (iCF !== -1) {
+        let existing = {};
+        try { existing = JSON.parse(data[rowIdx][iCF] || '{}'); } catch(e) {}
+        Object.assign(existing, updates.CustomFields);
+        updatedStudentRow[iCF] = JSON.stringify(existing);
+      }
+    }
+    sh.getRange(rowIdx + 1, 1, 1, updatedStudentRow.length).setValues([updatedStudentRow]);
+
+    if (classChanged) {
+      const shHist = ss.getSheetByName('studenthistory');
+      if (shHist && shHist.getLastRow() >= 1) {
+        const hData = shHist.getDataRange().getValues();
+        const hH = hData[0].map(x => String(x).toUpperCase().replace(/\s/g,''));
+        const iHid = hH.indexOf('HISTORYID');
+        const iSid = hH.indexOf('STUDENTID');
+        const iYr = hH.indexOf('SCHOOLYEAR');
+        const iLvl = hH.indexOf('GRADELEVELID');
+        const iSec = hH.indexOf('SECTION');
+        const iStat = hH.indexOf('STATUS');
+        const iUpdHist = hH.indexOf('UPDATEDAT');
+
+        let activeRow = -1;
+        for (let i = hData.length - 1; i >= 1; i--) {
+          const sameStudent = String(hData[i][iSid] || '').trim() === String(studentId).trim();
+          const isActive = String(hData[i][iStat] || '').toUpperCase() === 'ACTIVE';
+          if (sameStudent && isActive) { activeRow = i; break; }
+        }
+
+        if (activeRow !== -1) {
+          // PERF FIX: batch history row updates into one setValues() call.
+          const updatedHistRow = hData[activeRow].slice();
+          if (iLvl !== -1 && nextLevelRaw !== undefined) updatedHistRow[iLvl] = nextLevel;
+          if (iSec !== -1 && nextSectionRaw !== undefined) updatedHistRow[iSec] = nextSection;
+          if (iUpdHist !== -1) updatedHistRow[iUpdHist] = new Date();
+          shHist.getRange(activeRow + 1, 1, 1, updatedHistRow.length).setValues([updatedHistRow]);
+        } else {
+          const currentYear = getActiveAcademicYear_();
+          const histID = 'HIS-' + Utilities.getUuid().substring(0,8);
+          const histRow = hH.map(hdr => {
+            switch(hdr) {
+              case 'HISTORYID': return histID;
+              case 'STUDENTID': return studentId;
+              case 'SCHOOLYEAR': return currentYear;
+              case 'GRADELEVELID': return nextLevel || 'N/A';
+              case 'SECTION': return nextSection || 'A';
+              case 'STATUS': return 'ACTIVE';
+              case 'TIMESTAMP':
+              case 'UPDATEDAT': return new Date();
+              default: return '';
+            }
+          });
+          shHist.appendRow(histRow);
+        }
+
+        CacheService.getScriptCache().remove('ACTIVE_HISTORY_CACHE_' + ss.getId());
+      }
+    }
+
+    writeAuditLog_('UPDATE_STUDENT', studentId, Object.keys(updates).join(','), 'p_dossier');
+    return { success:true, message:'Dossier mis a jour: ' + studentId };
+  } catch(e) {
+    return { success:false, error:e.message };
+  }
+}
+
+function searchStudents_(query, auth) {
+  const students = getAllStudents_(auth);
+  const term = String(query||'').toLowerCase().trim();
+  if (!term) return { success:true, data:students };
+  return { success:true, data: students.filter(s =>
+    String(s.FirstName||'').toLowerCase().includes(term) ||
+    String(s.LastName||'').toLowerCase().includes(term) ||
+    String(s.StudentCode||'').toLowerCase().includes(term) ||
+    String(s.NISU||'').toLowerCase().includes(term)
+  )};
+}
+
+// [F8] isCurrent flag added to each row
+function getStudentHistory_(studentId, auth) {
+  try {
+    const cleanId = typeof studentId === 'object' ? studentId.id : studentId;
+    if (!cleanId) return [];
+    const guard = ensureViewerCanAccessStudentScope_(cleanId, auth);
+    if (!guard.success) return { success:false, error:guard.error };
+    const ss   = getSS_();
+    const sh   = ss.getSheetByName('studenthistory');
+    if (!sh) return [];
+    const data = sh.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).toUpperCase().replace(/\s/g,''));
+    const iId  = h.indexOf('STUDENTID');
+    const iYr  = h.indexOf('SCHOOLYEAR');
+    const iLvl = h.indexOf('GRADELEVELID');
+    const iSec = h.indexOf('SECTION');
+    const iSt  = h.indexOf('STATUS');
+    const iHid = h.indexOf('HISTORYID');
+    const iDr  = h.indexOf('DROPREASON');
+    const iDd  = h.indexOf('DROPDATE');
+    if (iId === -1) return [];
+    return data.slice(1)
+      .filter(r => String(r[iId]).trim() === String(cleanId).trim())
+      .map(r => ({
+        historyId:  iHid !== -1 ? r[iHid] : '',
+        year:       r[iYr] || '',
+        level:      r[iLvl] || '',
+        section:    iSec !== -1 ? r[iSec] : '',
+        status:     iSt  !== -1 ? r[iSt]  : '',
+        dropReason: iDr  !== -1 ? r[iDr]  : '',
+        dropDate:   iDd  !== -1 ? r[iDd]  : '',
+        isCurrent:  iSt  !== -1 ? String(r[iSt]).toUpperCase() === 'ACTIVE' : false
+      }))
+      .sort((a,b) => b.year.localeCompare(a.year));
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+function lookupStudentGlobal_(studentId, auth) {
+  try {
+    const target = String(studentId || '').trim().toUpperCase();
+    if (!target) return { success:false, found:false, message:'Identifiant manquant.' };
+
+    const normalizeLegacyId_ = (value) => String(value || '').toUpperCase().trim().replace(/[^A-Z0-9]/g, '');
+    const buildLegacyCandidates_ = (value) => {
+      const base = String(value || '').toUpperCase().trim();
+      const compact = normalizeLegacyId_(base);
+      const set = {};
+      [base, compact].forEach(v => { if (v) set[v] = true; });
+      if (/^MT[0-9]+$/.test(compact)) set['MT-' + compact.slice(2)] = true;
+      if (/^MT-[0-9]+$/.test(base)) set[base.replace('-', '')] = true;
+      return Object.keys(set);
+    };
+
+    const ssId = SpreadsheetApp.getActiveSpreadsheet().getId();
+    const candidates = buildLegacyCandidates_(target);
+    const cacheKey = 'LOOKUP_ID_' + ssId + '_' + candidates.map(normalizeLegacyId_).join('|');
+    const cachedLookup = _safeCacheGetData_(cacheKey);
+    if (cachedLookup) {
+      if (cachedLookup.success && cachedLookup.found && cachedLookup.student && cachedLookup.student.Student_ID && auth && auth.token) {
+        const guardCached = ensureViewerCanAccessStudentScope_(cachedLookup.student.Student_ID, auth);
+        if (!guardCached.success) return { success:false, found:false, message:guardCached.error || 'Accès refusé.' };
+      }
+      return cachedLookup;
+    }
+
+    const master = SpreadsheetApp.openById(MASTER_AUTH_ID);
+    const sh = master.getSheetByName('Generated_IDs');
+    if (!sh) return { success:false, found:false, message:'Generated_IDs introuvable.' };
+
+    const data = sh.getDataRange().getValues();
+    const h = data[0].map(x => String(x).toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s/g, ''));
+    const iId = h.indexOf('ID');
+    const iFn = h.indexOf('PRENOM');
+    const iLn = h.indexOf('NOM');
+    const iPhoto = h.indexOf('PHOTOURL');
+    const iOrg = h.indexOf('ORGID');
+    const iStatus = h.indexOf('STATUS');
+    if (iId === -1) return { success:false, found:false, message:'Colonne ID manquante.' };
+
+    const normalizedCandidates = candidates.map(normalizeLegacyId_).filter(Boolean);
+    const row = data.slice(1).find(r => normalizedCandidates.indexOf(normalizeLegacyId_(r[iId])) !== -1);
+    if (!row) {
+      const miss = { success:false, found:false, message:'Identifiant non certifie pour cet etablissement.' };
+      _safeCachePut(cacheKey, JSON.stringify(miss), 120);
+      return miss;
+    }
+
+    const currentOrgId = String(getOrgId_() || '').trim();
+    const rowOrgId = iOrg !== -1 ? String(row[iOrg] || '').trim() : '';
+    if (rowOrgId && currentOrgId && currentOrgId !== 'UNKNOWN_ORG' && rowOrgId !== currentOrgId) {
+      const denied = {
+        success:false,
+        found:false,
+        denied:true,
+        message:'Ce matricule appartient a un autre etablissement.'
+      };
+      _safeCachePut(cacheKey, JSON.stringify(denied), 120);
+      return denied;
+    }
+
+    if (iStatus !== -1) {
+      const status = String(row[iStatus] || '').trim().toUpperCase();
+      if (status && /INACTIF|INACTIVE|SUSPENDU|SUSPENDED|BLOCKED|BLOQUE|DISABLED|FALSE|ARCHIVED/.test(status)) {
+        const inactive = { success:false, found:false, message:'Ce matricule n\'est plus actif.' };
+        _safeCachePut(cacheKey, JSON.stringify(inactive), 120);
+        return inactive;
+      }
+    }
+
+    let photo = iPhoto !== -1 ? String(row[iPhoto]).trim() : '';
+    if (photo.includes('drive.google.com')) {
+      const m = photo.match(/id=([a-zA-Z0-9_-]+)/) || photo.match(/\/d\/([a-zA-Z0-9_-]+)\//);
+      if (m) photo = 'https://drive.google.com/thumbnail?id=' + m[1] + '&sz=w400';
+    }
+
+    const firstName = iFn !== -1 ? String(row[iFn] || '').trim() : '';
+    const lastName = iLn !== -1 ? String(row[iLn] || '').trim() : '';
+    const matchedId = String(row[iId] || '').trim();
+    const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
+
+    const ok = {
+      success:true,
+      found:true,
+      belongsToSchool:true,
+      student:{
+        Student_ID: matchedId,
+        Student_Name: fullName.toUpperCase(),
+        Picture_URL: photo || '',
+        ORG_ID: rowOrgId
+      },
+      data:{
+        StudentCode: matchedId,
+        FirstName: firstName,
+        LastName: lastName,
+        PhotoURL: photo,
+        OrgId: rowOrgId
+      }
+    };
+    if (auth && auth.token) {
+      const guard = ensureViewerCanAccessStudentScope_(ok.student.Student_ID, auth);
+      if (!guard.success) return { success:false, found:false, message:guard.error || 'Accès refusé.' };
+    }
+    _safeCachePut(cacheKey, JSON.stringify(ok), 600);
+    return ok;
+  } catch(e) { return { success:false, found:false, message:e.message }; }
+}
+
+function verifyStudentByLast4_(query) {
+  try {
+    const term = String(query || '').toLowerCase().trim();
+    if (!term) return { found:false };
+
+    const ss   = getSS_();
+    const cacheKey = 'VERIFY_INDEX_' + ss.getId();
+    let rows = _safeCacheGetData_(cacheKey);
+
+    if (!rows || !Array.isArray(rows)) {
+      const sh = ss.getSheetByName('students');
+      if (!sh) return { found:false };
+      const data = sh.getDataRange().getValues();
+      const h    = data[0].map(x => String(x).trim().toUpperCase());
+      const iCode= h.indexOf('STUDENTCODE');
+      const iFn  = h.indexOf('FIRSTNAME');
+      const iLn  = h.indexOf('LASTNAME');
+      const iPic = h.indexOf('PHOTOURL');
+      const iLvl = h.indexOf('CURRENTLEVEL');
+      const iNisu= h.indexOf('NISU');
+
+      rows = data.slice(1).map(r => {
+        let photo = iPic !== -1 ? String(r[iPic]).trim() : '';
+        if (photo.includes('drive.google.com')) {
+          const m = photo.match(/id=([a-zA-Z0-9_-]+)/) || photo.match(/\/d\/([a-zA-Z0-9_-]+)\//);
+          if (m) photo = 'https://drive.google.com/thumbnail?id=' + m[1] + '&sz=w400';
+        }
+        return {
+          code: String(r[iCode] || ''),
+          fn: String(r[iFn] || ''),
+          ln: String(r[iLn] || ''),
+          nisu: iNisu !== -1 ? String(r[iNisu] || '') : '',
+          lvl: iLvl !== -1 ? r[iLvl] : '',
+          photo: photo
+        };
+      });
+      _safeCachePut(cacheKey, JSON.stringify(rows), 180);
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const code = String(r.code || '').toLowerCase();
+      const fn = String(r.fn || '').toLowerCase();
+      const ln = String(r.ln || '').toLowerCase();
+      const niso = String(r.nisu || '').toLowerCase();
+      if (code.includes(term) || fn.includes(term) || ln.includes(term) || (niso && niso.includes(term))) {
+        return { found:true, student:{ Student_ID:r.code, Student_Name:(r.fn + ' ' + r.ln).toUpperCase(), Picture_URL:r.photo || '', CurrentLevel:r.lvl || '' }};
+      }
+    }
+    return { found:false };
+  } catch(e) { return { found:false, error:e.message }; }
+}
+
+function getStudentFieldsConfig_() {
+  const SYSTEM_FIELDS = [
+    { id:'StudentCode',      label:'Code Eleve',       type:'text',    isSystem:true },
+    { id:'FirstName',        label:'Prenom',           type:'text',    isSystem:true },
+    { id:'LastName',         label:'Nom',              type:'text',    isSystem:true },
+    { id:'Phone',            label:'Telephone',        type:'tel',     isSystem:true },
+    { id:'PhotoURL',         label:'Photo',            type:'text',    isSystem:true },
+    { id:'CurrentLevel',     label:'Classe',           type:'select',  isSystem:true },
+    { id:'Gender',           label:'Sexe',             type:'select',  options:['Masculin','Féminin'], isSystem:true },
+    { id:'Address',          label:'Adresse',          type:'text',    isSystem:true },
+    { id:'BirthDate',        label:'Date de naissance',type:'date',    isSystem:true },
+    { id:'EnrollmentStatus', label:'Statut',           type:'text',    isSystem:true },
+    { id:'Active',           label:'Actif',            type:'text',    isSystem:true }
+  ];
+  const LOCKED = new Set([
+    'StudentCode', 'FirstName', 'LastName', 'Phone', 'PhotoURL',
+    'CurrentLevel', 'Gender', 'Address', 'BirthDate', 'EnrollmentStatus', 'Active'
+  ]);
+  const inferType_ = function(fieldId) {
+    const key = String(fieldId || '').toUpperCase();
+    if (key.indexOf('DATE') !== -1 || key === 'BIRTHDATE') return 'date';
+    if (key.indexOf('EMAIL') !== -1) return 'email';
+    if (key.indexOf('PHONE') !== -1 || key.indexOf('TEL') !== -1) return 'tel';
+    return 'text';
+  };
+  try {
+    const ss = getSS_();
+    const sh = ss.getSheetByName('students');
+    const headers = sh && sh.getLastRow() >= 1
+      ? sh.getRange(1, 1, 1, Math.max(sh.getLastColumn(), 1)).getValues()[0].map(function(x) { return String(x || '').trim(); }).filter(Boolean)
+      : [];
+
+    const scriptProps = PropertiesService.getScriptProperties();
+    const docProps = PropertiesService.getDocumentProperties();
+    const savedRaw = scriptProps.getProperty('STUDENT_FORM_CONFIG')
+      || scriptProps.getProperty('STUDENT_FIELDS_CONFIG')
+      || docProps.getProperty('STUDENT_FORM_CONFIG')
+      || '[]';
+    const saved = JSON.parse(savedRaw);
+    const getSavedById_ = function(fieldId) {
+      return (saved || []).find(function(x) {
+        const sid = String((x && (x.id || x.key)) || '').trim();
+        return sid === fieldId;
+      });
+    };
+
+    const fields = SYSTEM_FIELDS.map(function(sys) {
+      const s = getSavedById_(sys.id);
+      return Object.assign({}, sys, {
+        key: sys.id,
+        enabled:  LOCKED.has(sys.id) ? true  : (s ? s.enabled  : true),
+        required: LOCKED.has(sys.id) ? true  : (s ? s.required : false),
+        isLocked: LOCKED.has(sys.id)
+      });
+    });
+
+    headers.forEach(function(h) {
+      if (!h) return;
+      if (fields.some(function(f) { return f.id === h; })) return;
+      const s = getSavedById_(h);
+      fields.push({
+        id: h,
+        key: h,
+        label: (s && s.label) ? s.label : h,
+        type: (s && s.type) ? s.type : inferType_(h),
+        enabled: s && s.enabled !== undefined ? !!s.enabled : true,
+        required: s && s.required !== undefined ? !!s.required : false,
+        isSystem: false,
+        isLocked: false
+      });
+    });
+
+    (saved || []).forEach(function(s) {
+      const sid = String((s && (s.id || s.key)) || '').trim();
+      if (!sid) return;
+      if (fields.some(function(f) { return f.id === sid; })) return;
+      fields.push({
+        id: sid,
+        key: sid,
+        label: String(s.label || sid),
+        type: String(s.type || inferType_(sid)),
+        enabled: s.enabled !== undefined ? !!s.enabled : true,
+        required: s.required !== undefined ? !!s.required : false,
+        isSystem: false,
+        isLocked: false
+      });
+    });
+
+    return { success:true, data: fields, fields: fields };
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+function addInternalNote_(data, auth) {
+  try {
+    const viewer  = getViewerInfo_(auth);
+    const studentId = data && (data.studentId || data.id) ? String(data.studentId || data.id).trim() : '';
+    if (studentId) {
+      const guard = ensureViewerCanAccessStudentScope_(studentId, viewer);
+      if (!guard.success) return { success:false, error:guard.error };
+    }
+    const ss      = getSS_();
+    const sh      = ss.getSheetByName('internal_notes');
+    const noteId  = 'NOTE-' + Utilities.getUuid().substring(0,8);
+    const meta    = { visibility: data.visibility || 'Admin', historyId: data.historyId || '' };
+    sh.appendRow([noteId, studentId, data.content||'', viewer.email||'System', viewer.role||'Admin', new Date(), JSON.stringify(meta)]);
+    return { success:true, noteId };
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+function getInternalNotes_(params, auth) {
+  try {
+    const studentId = params && (params.studentId || params.id) ? (params.studentId||params.id) : null;
+    if (studentId) {
+      const guard = ensureViewerCanAccessStudentScope_(studentId, auth);
+      if (!guard.success) return { success:false, error:guard.error };
+    }
+    const ss   = getSS_();
+    const sh   = ss.getSheetByName('internal_notes');
+    if (!sh || sh.getLastRow() < 2) return { success:true, data:[] };
+    const data = sh.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).trim());
+    let rows   = data.slice(1);
+    if (studentId) {
+      const iSid = h.indexOf('StudentID');
+      rows = rows.filter(r => String(r[iSid]).trim() === String(studentId).trim());
+    }
+    return { success:true, data: rows.map(r => {
+      const obj = {};
+      h.forEach((k,i) => obj[k] = r[i]);
+      if (typeof obj.MetaJSON === 'string') { try { obj.MetaJSON = JSON.parse(obj.MetaJSON); } catch(e) {} }
+      return obj;
+    })};
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+// ============================================================
+// ENROLLMENT MANAGEMENT (blueprint N1-N5)
+// ============================================================
+
+// ── [N4] getActiveEnrollment_ ────────────────────────────────
+/**
+ * Returns the active enrollment for a student by checking
+ * whether their LATEST history row is ACTIVE.
+ */
+function getActiveEnrollment_(studentId) {
+  try {
+    if (!studentId) return { success: false, error: 'studentId manquant.' };
+    const ss = getSS_();
+    const sh = ss.getSheetByName('studenthistory');
+    if (!sh || sh.getLastRow() < 2) return { success: true, data: null };
+ 
+    const data = sh.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).toUpperCase().replace(/\s/g,''));
+    const iHid  = h.indexOf('HISTORYID');
+    const iSid  = h.indexOf('STUDENTID');
+    const iYr   = h.indexOf('SCHOOLYEAR');
+    const iLvl  = h.indexOf('GRADELEVELID');
+    const iSec  = h.indexOf('SECTION');
+    const iStat = h.indexOf('STATUS');
+ 
+    const latest = _getLatestHistoryRow_(data, h, studentId);
+    if (!latest || String(latest[iStat]).toUpperCase() !== 'ACTIVE') {
+      return { success: true, data: null };
+    }
+ 
+    return {
+      success: true,
+      data: {
+        historyId:  latest[iHid],
+        schoolYear: latest[iYr],
+        gradeLevel: latest[iLvl],
+        section:    latest[iSec],
+        status:     latest[iStat]
+      }
+    };
+  } catch(e) { return { success: false, error: e.message }; }
+}
+/**
+ * Internal enrollment function without lock (for use when lock is already held)
+ * @private
+ */
+function _enrollStudentInternal_(payload, ss, logFn) {
+  const log = logFn || function(msg) { Logger.log(msg); };
+  try {
+    const studentId = payload.studentId;
+    if (!studentId) throw new Error('studentId manquant.');
+
+    const ssToUse = ss || getSS_();
+
+    // Safely resolve academic year — getSaaSSettings_() can return {success:false}
+    // when called under a lock (cold cache), which would make .data undefined and crash.
+    let year = payload.schoolYear || '';
+    if (!year) {
+      try {
+        const sr = getSaaSSettings_();
+        if (sr && sr.success && sr.data) year = String(sr.data.ACADEMIC_YEAR || '').trim();
+      } catch(e) {
+        log('[ENROLL_WARN] getSaaSSettings_ failed: ' + e.message);
+      }
+    }
+    if (!year) year = getActiveAcademicYear_();
+    if (!year || year === 'ANNEE_NON_CONFIGUREE')
+      throw new Error('Annee scolaire non configuree. Definissez ACADEMIC_YEAR dans Parametres.');
+
+    const shH = ssToUse.getSheetByName('studenthistory');
+    if (!shH) {
+      log('[ENROLL_ERROR] studenthistory sheet not found!');
+      throw new Error('studenthistory sheet not found');
+    }
+
+    // A sheet with only a header row is valid — do NOT throw, just skip duplicate check
+    if (shH.getLastRow() < 1) {
+      log('[ENROLL_ERROR] studenthistory sheet has no headers!');
+      throw new Error('studenthistory sheet has no headers');
+    }
+
+    const hData = shH.getDataRange().getValues();
+    const hH    = hData[0].map(x => String(x).toUpperCase().replace(/\s/g,''));
+    log('[ENROLL_DEBUG] History headers: ' + JSON.stringify(hH));
+
+    // Only check for duplicates when data rows actually exist
+    if (hData.length > 1) {
+      const latest = _getLatestHistoryRow_(hData, hH, studentId);
+      if (latest) {
+        const iStat = hH.indexOf('STATUS');
+        const iYr   = hH.indexOf('SCHOOLYEAR');
+        if (String(latest[iStat]).toUpperCase() === 'ACTIVE') {
+          return {
+            success: false,
+            error: 'Cet eleve est deja inscrit pour '
+              + (iYr !== -1 ? latest[iYr] : 'l\'annee en cours')
+              + '. Utilisez reEnrollStudent_ ou dropStudent_ d\'abord.'
+          };
+        }
+      }
+    }
+
+    const histID = 'HIS-' + Utilities.getUuid().substring(0,8);
+    const newRow = hData[0].map(hdr => {
+      const normalized = hdr.toUpperCase().replace(/\s/g,'');
+      switch(normalized) {
+        case 'HISTORYID':    return histID;
+        case 'STUDENTID':    return studentId;
+        case 'SCHOOLYEAR':   return year;
+        case 'GRADELEVELID': return payload.gradeLevelId || payload.level || 'N/A';
+        case 'SECTION':      return payload.section || 'A';
+        case 'STATUS':       return 'ACTIVE';
+        case 'TIMESTAMP':
+        case 'UPDATEDAT':    return new Date();
+        default:             return '';
+      }
+    });
+
+    log('[ENROLL_DEBUG] Appending row for ' + studentId + ': ' + JSON.stringify(newRow));
+    shH.appendRow(newRow);
+    log('[ENROLL] Student ' + studentId + ' enrolled for ' + year + ' at level ' + (payload.gradeLevelId || payload.level || 'N/A'));
+
+    writeAuditLog_('ENROLL_STUDENT', studentId,
+      'year:' + year + ' level:' + (payload.gradeLevelId || 'N/A'), 'p_dossier');
+    return {
+      success: true,
+      historyId: histID,
+      message: 'Inscription creee pour ' + studentId + ' — ' + year
+    };
+  } catch(e) {
+    log('[ENROLL_ERROR] ' + e.message);
+    return { success: false, error: e.message };
+  }
+}
+
+function enrollStudent_(payload, auth) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(10000);
+    return _enrollStudentInternal_(payload, null, null);
+  } catch(e) { return { success: false, error: e.message }; }
+  finally { lock.releaseLock(); }
+}
+
+// ── [N2] dropStudent_ ────────────────────────────────────────
+/**
+ * Appends a new DROPPED row copying the student's current
+ * enrollment data.  The original ACTIVE row is NEVER touched.
+ */
+function dropStudent_(payload, auth) {
+  try {
+    const studentId = payload.studentId;
+    if (!studentId) throw new Error('studentId manquant.');
+ 
+    const ss  = getSS_();
+    const shH = ss.getSheetByName('studenthistory');
+    if (!shH) throw new Error('studenthistory introuvable.');
+ 
+    const data = shH.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).toUpperCase().replace(/\s/g,''));
+    const iHid  = h.indexOf('HISTORYID');
+    const iSid  = h.indexOf('STUDENTID');
+    const iStat = h.indexOf('STATUS');
+    const iDr   = h.indexOf('DROPREASON');
+    const iDd   = h.indexOf('DROPDATE');
+    const iUpd  = h.indexOf('UPDATEDAT');
+    const iTs   = h.indexOf('TIMESTAMP');
+ 
+    // Current state must be ACTIVE
+    const latest = _getLatestHistoryRow_(data, h, studentId);
+    if (!latest || String(latest[iStat]).toUpperCase() !== 'ACTIVE') {
+      return { success: false, error: 'Aucun historique ACTIVE trouve pour ' + studentId };
+    }
+ 
+    // Clone the latest row and stamp the new state — DO NOT touch the original
+    const newRow = latest.slice();                                 // shallow copy
+    if (iHid  !== -1) newRow[iHid]  = 'HIS-' + Utilities.getUuid().substring(0,8);
+    if (iStat !== -1) newRow[iStat] = 'DROPPED';
+    if (iDr   !== -1) newRow[iDr]   = payload.dropReason || '';
+    if (iDd   !== -1) newRow[iDd]   = payload.dropDate   || new Date();
+    if (iUpd  !== -1) newRow[iUpd]  = new Date();
+    if (iTs   !== -1) newRow[iTs]   = new Date();
+ 
+    shH.appendRow(newRow);   // ← append only, nothing mutated above
+ 
+    writeAuditLog_('DROP_STUDENT', studentId, payload.dropReason || 'N/A', 'p_dossier');
+    return { success: true, message: 'Eleve marque comme DROPPED: ' + studentId };
+  } catch(e) { return { success: false, error: e.message }; }
+}
+// ── [N3] reEnrollStudent_ ────────────────────────────────────
+/**
+ * Re-enrolls a student whose LATEST row is DROPPED or ALUMNI.
+ * Rejects if the latest row is already ACTIVE.
+ * Always delegates to enrollStudent_ which appends a fresh row.
+ */
+function reEnrollStudent_(payload, auth) {
+  try {
+    const studentId = payload.studentId;
+    if (!studentId) throw new Error('studentId manquant.');
+ 
+    const ss    = getSS_();
+    const shH   = ss.getSheetByName('studenthistory');
+    if (!shH) throw new Error('studenthistory introuvable.');
+ 
+    const data = shH.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).toUpperCase().replace(/\s/g,''));
+ 
+    // Confirm identity exists
+    const shS   = ss.getSheetByName('students');
+    const sData = shS ? shS.getDataRange().getValues() : [];
+    const sH    = sData.length ? sData[0].map(x => String(x).trim()) : [];
+    const iCode = sH.indexOf('StudentCode');
+    const exists = iCode !== -1 &&
+      sData.slice(1).some(r => String(r[iCode]).trim() === studentId);
+    if (!exists) return { success: false, error: 'Identite eleve introuvable: ' + studentId };
+ 
+    // Check latest row — must NOT be ACTIVE
+    const latest = _getLatestHistoryRow_(data, h, studentId);
+    if (latest) {
+      const iStat = h.indexOf('STATUS');
+      if (String(latest[iStat]).toUpperCase() === 'ACTIVE') {
+        return {
+          success: false,
+          error: 'L\'eleve est deja ACTIVE. Utilisez dropStudent_ avant de re-inscrire.'
+        };
+      }
+    }
+ 
+    // Delegate — enrollStudent_ will append a new ACTIVE row
+    return enrollStudent_(payload, auth);
+  } catch(e) { return { success: false, error: e.message }; }
+}
+/**
+ * [N5] updateStudentHistory_
+ * Patch a specific history row (e.g. change section, fix level).
+ * Cannot change StudentID or HistoryID.
+ * payload: { historyId, section?, gradeLevelId?, status? }
+ */
+function getSubjectMaxScore_(subjectId, historyId, ss) {
+  try {
+    // Get history to get level
+    const shHist = ss.getSheetByName('studenthistory');
+    const hData = shHist.getDataRange().getValues();
+    const hH = hData[0];
+    const iId = hH.indexOf('HistoryID');
+    const iLvl = hH.indexOf('GradeLevelID');
+    let level = '';
+    for (let i = 1; i < hData.length; i++) {
+      if (String(hData[i][iId]).trim() === historyId) {
+        level = String(hData[i][iLvl] || '').trim();
+        break;
+      }
+    }
+    if (!level) return 100; // default
+    // Get curriculum
+    const conf = getSaaSSettings_().data;
+    const currKey = 'CURRICULUM_' + level.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const curriculum = conf[currKey];
+    if (!curriculum) return 100;
+    for (let subj of curriculum) {
+      if (subj.subjectId === subjectId) {
+        var coef = Number(subj.coef);
+        return (isFinite(coef) && coef > 0) ? coef : 100;
+      }
+    }
+    return 100;
+  } catch(e) {
+    return 100;
+  }
+}
+
+function updateStudentHistory_(payload, auth) {
+  try {
+    if (!payload.historyId) throw new Error('historyId manquant.');
+    const ss   = getSS_();
+    const shH  = ss.getSheetByName('studenthistory');
+    if (!shH) throw new Error('studenthistory introuvable.');
+    const data = shH.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).toUpperCase().replace(/\s/g,''));
+    const iHid  = h.indexOf('HISTORYID');
+    const iSec  = h.indexOf('SECTION');
+    const iLvl  = h.indexOf('GRADELEVELID');
+    const iStat = h.indexOf('STATUS');
+    const iUpd  = h.indexOf('UPDATEDAT');
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][iHid]).trim() === String(payload.historyId).trim()) {
+        // PERF FIX: batch all field updates into one setValues() call.
+        const updHRow = data[i].slice();
+        if (payload.section    !== undefined && iSec  !== -1) updHRow[iSec]  = payload.section;
+        if (payload.gradeLevelId !== undefined && iLvl !== -1) updHRow[iLvl] = payload.gradeLevelId;
+        if (payload.status !== undefined && iStat !== -1) updHRow[iStat] = payload.status;
+        if (iUpd !== -1) updHRow[iUpd] = new Date();
+        shH.getRange(i + 1, 1, 1, updHRow.length).setValues([updHRow]);
+        writeAuditLog_('UPDATE_HISTORY', payload.historyId,
+          JSON.stringify({ section:payload.section, level:payload.gradeLevelId }), 'p_dossier');
+        return { success:true, message:'Historique mis a jour: ' + payload.historyId };
+      }
+    }
+    return { success:false, error:'HistoryID introuvable: ' + payload.historyId };
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+// ============================================================
+// GRADES
+// ============================================================
+function _clearStudentGradesCache(studentId, ssId) {
+  const cacheKey = 'STUDENT_GRADES_' + studentId.toUpperCase() + '_' + ssId;
+  CacheService.getScriptCache().remove(cacheKey);
+  // Promotion rows contain calculated averages and decisions derived from
+  // grades. Keep that view in sync immediately after a grade is saved.
+  try {
+    CacheService.getScriptCache().remove('PROMO_OVERVIEW_' + ssId + '_CUR');
+  } catch (_) {}
+  // Invalider aussi le cache des rapports comparatifs : tout changement de
+  // note/présence doit se refléter immédiatement dans le dashboard.
+  _bumpClassComparisonCacheVersion_();
+}
+
+// Le cache de getClassComparisonData_ utilise des clés base64 non énumérables.
+// Pour invalider sans connaître les clés, on publie un compteur de version
+// que la fonction de lecture vérifie. Un changement de version invalide
+// implicitement toutes les entrées sans avoir à les supprimer une par une.
+function _bumpClassComparisonCacheVersion_(){
+  try {
+    CacheService.getScriptCache().put('CLASS_COMP_VERSION', String(Date.now()), 21600);
+  } catch (e) { /* cache plein : la lecture utilisera la version manquante */ }
+}
+function _getClassComparisonCacheVersion_(){
+  try { return String(CacheService.getScriptCache().get('CLASS_COMP_VERSION') || '0'); }
+  catch (e) { return '0'; }
+}
+
+function _clearAllCachesForSpreadsheet(ssId) {
+  const cache = CacheService.getScriptCache();
+  try {
+    // Clear curriculum cache
+    cache.remove('CURRICULUM_CACHE_' + ssId);
+    // Clear active history cache
+    cache.remove('ACTIVE_HISTORY_CACHE_' + ssId);
+    // Note: We can't easily clear all student grade caches for a spreadsheet
+    // as we don't have a way to list all cache keys

@@ -1,0 +1,516 @@
+// ============================================================
+
+function _ensureRegisterAiQuotaHeaders_(registerSheet) {
+  if (!registerSheet) return;
+  var currentHeaders = registerSheet.getRange(1, 1, 1, Math.max(registerSheet.getLastColumn(), 1))
+    .getValues()[0].map(function(x) { return String(x || '').trim(); });
+  var normalized = currentHeaders.map(function(h) { return String(h || '').trim().toUpperCase(); });
+  var required = ['SUBSCRIPTION_PLAN', 'AI_DAILY_TOKEN_LIMIT', 'AI_SESSION_TOKEN_LIMIT', 'AI_MONTHLY_TOKEN_LIMIT'];
+  var missing = [];
+  required.forEach(function(header) {
+    if (normalized.indexOf(header) === -1) missing.push(header);
+  });
+  if (missing.length) {
+    registerSheet.getRange(1, currentHeaders.length + 1, 1, missing.length)
+      .setValues([missing])
+      .setFontWeight('bold')
+      .setBackground('#fff2cc');
+  }
+}
+
+function getSaaSSettings_(token, targetYear) {
+  try {
+    const ss      = SpreadsheetApp.getActiveSpreadsheet();
+    const ssId    = ss.getId();
+    const cacheKey = 'SAAS_SETTINGS_' + ssId + '_' + (targetYear ? String(targetYear) : 'CURRENT');
+    const cached = _safeCacheGetData_(cacheKey);
+    if (cached) {
+      // PERF FIX (payment latency): this used to open the Master spreadsheet
+      // (cross-account SpreadsheetApp.openById — one of the slowest calls in
+      // Apps Script) on EVERY cache hit, just to re-run a one-time header
+      // self-heal check. recordNewPayment_ calls getSaaSSettings_ on every
+      // single payment, so a "cached" settings read was still silently
+      // paying for a full round-trip to another spreadsheet each time.
+      // The header check is idempotent and only matters once (or rarely, if
+      // a column is later removed) — throttle it instead of running it on
+      // every warm-cache hit.
+      try {
+        const headerCheckKey = 'REG_HEADERS_CHECKED_' + ssId;
+        if (!_safeCacheGetData_(headerCheckKey)) {
+          const cachedMaster = SpreadsheetApp.openById(MASTER_AUTH_ID);
+          const cachedReg = cachedMaster.getSheetByName('Register');
+          if (cachedReg) _ensureRegisterAiQuotaHeaders_(cachedReg);
+          _safeCachePut(headerCheckKey, JSON.stringify({ ok: true, at: new Date().toISOString() }), 21600);
+        }
+      } catch (_) {}
+      return { success: true, data: cached };
+    }
+
+    const master  = SpreadsheetApp.openById(MASTER_AUTH_ID);
+    const reg     = master.getSheetByName('Register');
+    if (!reg) return { success: false, error: 'Register sheet introuvable.' };
+    _ensureRegisterAiQuotaHeaders_(reg);
+    const regLastRow = reg.getLastRow();
+    const regLastCol = reg.getLastColumn();
+    if (regLastRow < 1 || regLastCol < 1) return { success: false, error: 'Register vide.' };
+    const rh      = reg.getRange(1, 1, 1, regLastCol).getValues()[0].map(x => String(x || '').trim().toUpperCase());
+
+    // Quota configuration is now expected per org in Register, so we do not auto-create AI_PLAN_QUOTAS.
+
+    const iSsId   = rh.indexOf('USER_SPREADSHEET_ID');
+    const iName   = rh.indexOf('BUSINESS_NAME');
+    const iDesign = rh.indexOf('ID_DESIGN_JSON');
+    const iRules  = rh.indexOf('ID_RULES_JSON');
+    const iAddr   = rh.findIndex(x => ['SCHOOL_ADDR','ADDRESS','ADRESSE'].includes(x));
+    const iRegId  = rh.indexOf('ID');
+    const iType   = rh.indexOf('ORG_TYPE');
+    const iDrive  = rh.indexOf('ORG_DRIVE_FOLDER_ID');
+    const iPortal = rh.indexOf('STUDENT_PORTAL_URL');
+    const iStaff  = rh.indexOf('STAFF_APP_URL');
+    const iPlan   = rh.indexOf('SUBSCRIPTION_PLAN');
+    const iExpiry = rh.indexOf('EXPIRATION_DATE');
+    const iPay    = rh.indexOf('PAYMENT_TYPE');
+    const iCreated = rh.indexOf('DATE_CREATED');
+    const iPicDrv = rh.indexOf('PICTURE_DRIVE_LINK');
+    const iRegEmail = rh.indexOf('EMAIL');
+    const iRegPhone = rh.indexOf('PHONE');
+    const iRegPhoneTxn = rh.indexOf('TRANSACTION_PHONE');
+    const iContactName = rh.indexOf('NAME');
+    const iAiProAccess = rh.indexOf('AI_PRO_ACCESS');
+    const iAiProDailyLimit = rh.indexOf('AI_PRO_DAILY_TOKEN_LIMIT');
+    const iAiFreeDailyLimit = rh.indexOf('AI_FREE_DAILY_TOKEN_LIMIT');
+    const iAiDailyLimit = rh.indexOf('AI_DAILY_TOKEN_LIMIT');
+    const iAiDailyLimitPro = rh.indexOf('AI_DAILY_TOKEN_LIMIT_PRO');
+    const iAiDailyLimitFree = rh.indexOf('AI_DAILY_TOKEN_LIMIT_FREE');
+    const iAiSessionLimit = rh.indexOf('AI_SESSION_TOKEN_LIMIT');
+    const iAiSessionLimitPro = rh.indexOf('AI_SESSION_TOKEN_LIMIT_PRO');
+    const iAiSessionLimitFree = rh.indexOf('AI_SESSION_TOKEN_LIMIT_FREE');
+    const iAiProSessionLimit = rh.indexOf('AI_PRO_SESSION_TOKEN_LIMIT');
+    const iAiFreeSessionLimit = rh.indexOf('AI_FREE_SESSION_TOKEN_LIMIT');
+    const iAiMonthlyLimit = rh.indexOf('AI_MONTHLY_TOKEN_LIMIT');
+    const iAiMonthlyLimitPro = rh.indexOf('AI_MONTHLY_TOKEN_LIMIT_PRO');
+    const iAiMonthlyLimitFree = rh.indexOf('AI_MONTHLY_TOKEN_LIMIT_FREE');
+    const iAiProMonthlyLimit = rh.indexOf('AI_PRO_MONTHLY_TOKEN_LIMIT');
+    const iAiFreeMonthlyLimit = rh.indexOf('AI_FREE_MONTHLY_TOKEN_LIMIT');
+    const iAiProDailyPdfLimit = rh.indexOf('AI_PRO_DAILY_PDF_LIMIT');
+
+    const extractOrgIdFromUrl_ = (url) => {
+      const txt = String(url || '').trim();
+      if (!txt) return '';
+      const match = txt.match(/[?&]orgId=([^&#]+)/i);
+      return match ? decodeURIComponent(match[1]) : '';
+    };
+
+    // Fast lookup: avoid loading entire Register matrix (can contain very large JSON cells).
+    const targetSsId_ = normalizeSpreadsheetId_(ssId);
+    let regRow = null;
+    if (iSsId !== -1 && regLastRow > 1) {
+      const idRange = reg.getRange(2, iSsId + 1, regLastRow - 1, 1);
+      const exactMatches = idRange.createTextFinder(String(ssId || '').trim())
+        .matchCase(false)
+        .matchEntireCell(true)
+        .findAll();
+
+      if (exactMatches && exactMatches.length) {
+        for (let m = exactMatches.length - 1; m >= 0; m--) {
+          const rowNumber = exactMatches[m].getRow();
+          const candidate = reg.getRange(rowNumber, 1, 1, regLastCol).getValues()[0];
+          if (!regRow) regRow = candidate;
+          if (iName !== -1 && String(candidate[iName] || '').trim()) {
+            regRow = candidate;
+            break;
+          }
+        }
+      }
+
+      // Fallback for formatted/misaligned IDs: scan only ID + name columns, then fetch one row.
+      if (!regRow) {
+        const idValues = idRange.getValues();
+        const nameValues = (iName !== -1)
+          ? reg.getRange(2, iName + 1, regLastRow - 1, 1).getValues()
+          : [];
+
+        let chosenRow = -1;
+        for (let i = idValues.length - 1; i >= 0; i--) {
+          const rowId = normalizeSpreadsheetId_(idValues[i][0]);
+          if (rowId !== targetSsId_) continue;
+          if (chosenRow === -1) chosenRow = i + 2;
+          if (iName !== -1 && String((nameValues[i] && nameValues[i][0]) || '').trim()) {
+            chosenRow = i + 2;
+            break;
+          }
+        }
+
+        if (chosenRow !== -1) {
+          regRow = reg.getRange(chosenRow, 1, 1, regLastCol).getValues()[0];
+        }
+      }
+    }
+
+    let masterData = {
+      SCHOOL_NAME:'Etablissement Meigens', SCHOOL_LOGO:'',
+      SCHOOL_ADDR:'', SCHOOL_EMAIL:'', SCHOOL_PHONE:'',
+      SYSTEM_ID_MODE:'COMPANY', SYSTEM_ID_PREFIX:'MT',
+      SCHOOL_CODE:'', ORG_ID:'', ORG_REGISTER_ID:'', ORG_NAME:'', ORG_TYPE:'',
+      USER_SPREADSHEET_ID:ss.getId(), STUDENT_PORTAL_URL:'', STAFF_APP_URL:'',
+      ORG_DRIVE_FOLDER_ID:'', SUBSCRIPTION_PLAN:'', EXPIRATION_DATE:'',
+      PAYMENT_TYPE:'', DATE_CREATED:'', CONTACT_NAME:'', CURRENT_ACADEMIC_YEAR:'',
+      PICTURE_DRIVE_LINK:'', BUSINESS_NAME:'', EMAIL:'', PHONE:'', TRANSACTION_PHONE:'',
+      NAME:'', ADDRESS:'', AI_PRO_ACCESS:'',
+      AI_PRO_DAILY_TOKEN_LIMIT:'', AI_FREE_DAILY_TOKEN_LIMIT:'',
+      AI_DAILY_TOKEN_LIMIT:'', AI_DAILY_TOKEN_LIMIT_PRO:'', AI_DAILY_TOKEN_LIMIT_FREE:'',
+      AI_SESSION_TOKEN_LIMIT:'', AI_SESSION_TOKEN_LIMIT_PRO:'', AI_SESSION_TOKEN_LIMIT_FREE:'',
+      AI_PRO_SESSION_TOKEN_LIMIT:'', AI_FREE_SESSION_TOKEN_LIMIT:'',
+      AI_MONTHLY_TOKEN_LIMIT:'', AI_MONTHLY_TOKEN_LIMIT_PRO:'', AI_MONTHLY_TOKEN_LIMIT_FREE:'',
+      AI_PRO_MONTHLY_TOKEN_LIMIT:'', AI_FREE_MONTHLY_TOKEN_LIMIT:'',
+      AI_PRO_DAILY_PDF_LIMIT:''
+    };
+    if (regRow) {
+      const regIdValue = iRegId !== -1 ? String(regRow[iRegId] || '').trim() : '';
+      const portalUrl = iPortal !== -1 ? String(regRow[iPortal] || '').trim() : '';
+      const portalOrgId = extractOrgIdFromUrl_(portalUrl);
+
+      masterData.SCHOOL_NAME = String(regRow[iName] || '').trim() || masterData.SCHOOL_NAME;
+      masterData.BUSINESS_NAME = masterData.SCHOOL_NAME;
+      masterData.ORG_NAME = masterData.SCHOOL_NAME;
+      masterData.SCHOOL_CODE = regIdValue || masterData.SCHOOL_CODE;
+      masterData.ORG_REGISTER_ID = regIdValue;
+      masterData.ORG_ID = portalOrgId || regIdValue || getOrgId_() || '';
+      masterData.ORG_TYPE = iType !== -1 ? String(regRow[iType] || '').trim() : '';
+      masterData.USER_SPREADSHEET_ID = iSsId !== -1 ? String(regRow[iSsId] || '').trim() : ss.getId();
+      masterData.STUDENT_PORTAL_URL = portalUrl;
+      masterData.STAFF_APP_URL = iStaff !== -1 ? String(regRow[iStaff] || '').trim() : '';
+      masterData.ORG_DRIVE_FOLDER_ID = iDrive !== -1 ? String(regRow[iDrive] || '').trim() : '';
+      masterData.SUBSCRIPTION_PLAN = iPlan !== -1 ? String(regRow[iPlan] || '').trim() : '';
+      masterData.EXPIRATION_DATE = iExpiry !== -1 ? String(regRow[iExpiry] || '').trim() : '';
+      masterData.PAYMENT_TYPE = iPay !== -1 ? String(regRow[iPay] || '').trim() : '';
+      masterData.DATE_CREATED = iCreated !== -1 ? String(regRow[iCreated] || '').trim() : '';
+      masterData.PICTURE_DRIVE_LINK = iPicDrv !== -1 ? String(regRow[iPicDrv] || '').trim() : '';
+      masterData.CONTACT_NAME = iContactName !== -1 ? String(regRow[iContactName] || '').trim() : '';
+      masterData.NAME = masterData.CONTACT_NAME;
+      masterData.AI_PRO_ACCESS = iAiProAccess !== -1 ? String(regRow[iAiProAccess] || '').trim() : '';
+      masterData.AI_PRO_DAILY_TOKEN_LIMIT = iAiProDailyLimit !== -1 ? String(regRow[iAiProDailyLimit] || '').trim() : '';
+      masterData.AI_FREE_DAILY_TOKEN_LIMIT = iAiFreeDailyLimit !== -1 ? String(regRow[iAiFreeDailyLimit] || '').trim() : '';
+      masterData.AI_DAILY_TOKEN_LIMIT = iAiDailyLimit !== -1 ? String(regRow[iAiDailyLimit] || '').trim() : '';
+      masterData.AI_DAILY_TOKEN_LIMIT_PRO = iAiDailyLimitPro !== -1 ? String(regRow[iAiDailyLimitPro] || '').trim() : '';
+      masterData.AI_DAILY_TOKEN_LIMIT_FREE = iAiDailyLimitFree !== -1 ? String(regRow[iAiDailyLimitFree] || '').trim() : '';
+      masterData.AI_SESSION_TOKEN_LIMIT = iAiSessionLimit !== -1 ? String(regRow[iAiSessionLimit] || '').trim() : '';
+      masterData.AI_SESSION_TOKEN_LIMIT_PRO = iAiSessionLimitPro !== -1 ? String(regRow[iAiSessionLimitPro] || '').trim() : '';
+      masterData.AI_SESSION_TOKEN_LIMIT_FREE = iAiSessionLimitFree !== -1 ? String(regRow[iAiSessionLimitFree] || '').trim() : '';
+      masterData.AI_PRO_SESSION_TOKEN_LIMIT = iAiProSessionLimit !== -1 ? String(regRow[iAiProSessionLimit] || '').trim() : '';
+      masterData.AI_FREE_SESSION_TOKEN_LIMIT = iAiFreeSessionLimit !== -1 ? String(regRow[iAiFreeSessionLimit] || '').trim() : '';
+      masterData.AI_MONTHLY_TOKEN_LIMIT = iAiMonthlyLimit !== -1 ? String(regRow[iAiMonthlyLimit] || '').trim() : '';
+      masterData.AI_MONTHLY_TOKEN_LIMIT_PRO = iAiMonthlyLimitPro !== -1 ? String(regRow[iAiMonthlyLimitPro] || '').trim() : '';
+      masterData.AI_MONTHLY_TOKEN_LIMIT_FREE = iAiMonthlyLimitFree !== -1 ? String(regRow[iAiMonthlyLimitFree] || '').trim() : '';
+      masterData.AI_PRO_MONTHLY_TOKEN_LIMIT = iAiProMonthlyLimit !== -1 ? String(regRow[iAiProMonthlyLimit] || '').trim() : '';
+      masterData.AI_FREE_MONTHLY_TOKEN_LIMIT = iAiFreeMonthlyLimit !== -1 ? String(regRow[iAiFreeMonthlyLimit] || '').trim() : '';
+      masterData.AI_PRO_DAILY_PDF_LIMIT = iAiProDailyPdfLimit !== -1 ? String(regRow[iAiProDailyPdfLimit] || '').trim() : '';
+
+      if (iAddr !== -1 && regRow[iAddr]) masterData.SCHOOL_ADDR = String(regRow[iAddr]).trim();
+      masterData.ADDRESS = masterData.SCHOOL_ADDR;
+      if (iRegEmail !== -1) masterData.SCHOOL_EMAIL = String(regRow[iRegEmail] || '').trim();
+      masterData.EMAIL = masterData.SCHOOL_EMAIL;
+      if (iRegPhone !== -1) masterData.SCHOOL_PHONE = String(regRow[iRegPhone] || '').trim();
+      masterData.PHONE = masterData.SCHOOL_PHONE;
+      if (iRegPhoneTxn !== -1) masterData.TRANSACTION_PHONE = String(regRow[iRegPhoneTxn] || '').trim();
+      if (!masterData.SCHOOL_PHONE && masterData.TRANSACTION_PHONE)
+        masterData.SCHOOL_PHONE = masterData.TRANSACTION_PHONE;
+      if (iDesign !== -1 && regRow[iDesign]) {
+        try {
+          const dj = JSON.parse(regRow[iDesign] || '{}');
+          if (dj.visuals && dj.visuals.logoUrl) masterData.SCHOOL_LOGO = dj.visuals.logoUrl;
+          if (!masterData.SCHOOL_ADDR && dj.contact && dj.contact.address)
+            masterData.SCHOOL_ADDR = dj.contact.address;
+          // Prefer the user-configured display name from the design panel over billing name
+          if (dj.general && dj.general.schoolName)
+            masterData.SCHOOL_NAME = String(dj.general.schoolName).trim() || masterData.SCHOOL_NAME;
+          if (dj.general && dj.general.promotion)
+            masterData.CURRENT_ACADEMIC_YEAR = String(dj.general.promotion).trim();
+          if (dj.general && dj.general.companyIdMode === 'ON') masterData.SYSTEM_ID_MODE = 'COMPANY';
+        } catch(e) {}
+      }
+      if (iRules !== -1 && regRow[iRules]) {
+        try {
+          const rj = JSON.parse(regRow[iRules] || '{}');
+          masterData.SYSTEM_ID_PREFIX = (rj.codeGeneration && rj.codeGeneration.prefix) || rj.idPrefix || 'MT';
+        } catch(e) {}
+      }
+    }
+
+    let localSh = null;
+    if (targetYear) {
+      const safeYear     = String(targetYear).replace(/[^a-zA-Z0-9]/g, '_');
+      const snapshotName = 'Settings_' + safeYear;
+      localSh = ss.getSheetByName(snapshotName);
+      if (!localSh) {
+        const archSh = ss.getSheetByName('Archives_Annuelles');
+        if (archSh && archSh.getLastRow() > 1) {
+          const archData = archSh.getDataRange().getValues();
+          const ah       = archData[0].map(x => String(x).trim().toUpperCase());
+          const iYear    = ah.indexOf('ANNEE SCOLAIRE');
+          const iAId     = ah.indexOf('ARCHIVE_ID');
+          const iSnap    = ah.indexOf('SETTINGS_SHEET');
+          for (let i = 1; i < archData.length; i++) {
+            if (String(archData[i][iYear]).trim() === String(targetYear).trim()) {
+              if (iSnap !== -1 && archData[i][iSnap]) {
+                localSh = ss.getSheetByName(String(archData[i][iSnap]));
+              }
+              if (!localSh && iAId !== -1 && archData[i][iAId]) {
+                try {
+                  const archSS = SpreadsheetApp.openById(archData[i][iAId]);
+                  localSh      = archSS.getSheetByName('Settings');
+                } catch(e2) {}
+              }
+              break;
+            }
+          }
+        }
+      }
+    }
+    if (!localSh) localSh = ss.getSheetByName('Settings');
+
+    let local = {};
+    if (localSh) {
+      const rows = localSh.getDataRange().getValues();
+      const tz = ss.getSpreadsheetTimeZone() || Session.getScriptTimeZone() || 'UTC';
+      for (let i = 1; i < rows.length; i++) {
+        const key = String(rows[i][0]).trim();
+        if (!key) continue;
+        let val = rows[i][1];
+        // Google Sheets sometimes auto-formats a string like "08:00" written
+        // for time-only settings (e.g. ATTENDANCE_ENTRY_TIME) as a real Date
+        // anchored on 1899-12-30. JSON serialization then sends a UTC ISO
+        // string back to the front-end, which displays the wrong wall clock
+        // because of the timezone shift. Re-format such Dates as plain
+        // "HH:mm" using the spreadsheet's own timezone so the value the user
+        // saved is the value the user gets back.
+        if (val instanceof Date && !isNaN(val.getTime())) {
+          try {
+            val = Utilities.formatDate(val, tz, 'HH:mm');
+          } catch(_) {
+            val = String(val);
+          }
+        }
+        if (typeof val === 'string' && (val.startsWith('{') || val.startsWith('['))) {
+          try { val = JSON.parse(val); } catch(e) {}
+        }
+        local[key] = val;
+      }
+    }
+    // local Settings sheet keys override masterData defaults so user-set values win.
+    let merged = Object.assign({}, masterData, local);
+    // Always expose canonical keys the frontend can rely on regardless of local key spelling.
+    if (!merged.SCHOOL_EMAIL && merged.CONTACTEMAIL) merged.SCHOOL_EMAIL = merged.CONTACTEMAIL;
+    if (!merged.SCHOOL_EMAIL && merged.SCHOOLEMAIL)  merged.SCHOOL_EMAIL = merged.SCHOOLEMAIL;
+    if (!merged.SCHOOL_PHONE && merged.CONTACTPHONE) merged.SCHOOL_PHONE = merged.CONTACTPHONE;
+    if (!merged.SCHOOL_PHONE && merged.SCHOOLPHONE)  merged.SCHOOL_PHONE = merged.SCHOOLPHONE;
+    if (!merged.SCHOOL_NAME  && merged.SCHOOLNAME)   merged.SCHOOL_NAME  = merged.SCHOOLNAME;
+    if (!merged.SCHOOL_NAME  && merged.BUSINESS_NAME) merged.SCHOOL_NAME = merged.BUSINESS_NAME;
+    if (!merged.SCHOOL_ADDR  && merged.ADDRESS) merged.SCHOOL_ADDR = merged.ADDRESS;
+    if (!merged.SCHOOL_EMAIL && merged.EMAIL) merged.SCHOOL_EMAIL = merged.EMAIL;
+    if (!merged.SCHOOL_PHONE && merged.PHONE) merged.SCHOOL_PHONE = merged.PHONE;
+    if (!merged.SCHOOL_PHONE && merged.TRANSACTION_PHONE) merged.SCHOOL_PHONE = merged.TRANSACTION_PHONE;
+    if (!merged.CONTACT_NAME && merged.NAME) merged.CONTACT_NAME = merged.NAME;
+    if (!merged.ORG_ID) merged.ORG_ID = getOrgId_() || '';
+
+    if (!merged.schoolName && merged.SCHOOL_NAME) merged.schoolName = merged.SCHOOL_NAME;
+    if (!merged.schoolLogo && merged.SCHOOL_LOGO) merged.schoolLogo = merged.SCHOOL_LOGO;
+    if (!merged.schoolAddress && merged.SCHOOL_ADDR) merged.schoolAddress = merged.SCHOOL_ADDR;
+    if (!merged.schoolEmail && merged.SCHOOL_EMAIL) merged.schoolEmail = merged.SCHOOL_EMAIL;
+    if (!merged.schoolPhone && merged.SCHOOL_PHONE) merged.schoolPhone = merged.SCHOOL_PHONE;
+    if (!merged.schoolCode && merged.SCHOOL_CODE) merged.schoolCode = merged.SCHOOL_CODE;
+    if (!merged.orgId && merged.ORG_ID) merged.orgId = merged.ORG_ID;
+    if (!merged.orgType && merged.ORG_TYPE) merged.orgType = merged.ORG_TYPE;
+    if (!merged.orgName && merged.ORG_NAME) merged.orgName = merged.ORG_NAME;
+    if (!merged.userSpreadsheetId && merged.USER_SPREADSHEET_ID) merged.userSpreadsheetId = merged.USER_SPREADSHEET_ID;
+    if (!merged.studentPortalUrl && merged.STUDENT_PORTAL_URL) merged.studentPortalUrl = merged.STUDENT_PORTAL_URL;
+    if (!merged.staffAppUrl && merged.STAFF_APP_URL) merged.staffAppUrl = merged.STAFF_APP_URL;
+    if (!merged.orgDriveFolderId && merged.ORG_DRIVE_FOLDER_ID) merged.orgDriveFolderId = merged.ORG_DRIVE_FOLDER_ID;
+    if (!merged.subscriptionPlan && merged.SUBSCRIPTION_PLAN) merged.subscriptionPlan = merged.SUBSCRIPTION_PLAN;
+    if (!merged.expirationDate && merged.EXPIRATION_DATE) merged.expirationDate = merged.EXPIRATION_DATE;
+    if (!merged.paymentType && merged.PAYMENT_TYPE) merged.paymentType = merged.PAYMENT_TYPE;
+    if (!merged.dateCreated && merged.DATE_CREATED) merged.dateCreated = merged.DATE_CREATED;
+    if (!merged.currentAcademicYear && merged.CURRENT_ACADEMIC_YEAR) merged.currentAcademicYear = merged.CURRENT_ACADEMIC_YEAR;
+    // Principal / director comes from Register column C = NAME.
+    if (merged.CONTACT_NAME) merged.schoolDirector = merged.CONTACT_NAME;
+    if (!merged.adminProxyEmail && merged.SCHOOL_EMAIL) merged.adminProxyEmail = merged.SCHOOL_EMAIL;
+    // Expose the script deployment exec URL so the frontend can build correct shareable links.
+    if (!merged.SCRIPT_EXEC_URL) {
+      try {
+        const svc = ScriptApp.getService();
+        if (svc) {
+          const execUrl = svc.getUrl() || '';
+          if (execUrl) { merged.SCRIPT_EXEC_URL = execUrl; merged.scriptExecUrl = execUrl; }
+        }
+      } catch(_) {}
+    }
+    merged = normalizeSaaSSettingsAcademicYear_(merged);
+    _safeCachePut(cacheKey, JSON.stringify(merged), 1800);
+    return { success: true, data: merged };
+  } catch(e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// Enregistre les clés API IA UNIQUEMENT dans Script Properties — jamais dans
+// la feuille Settings (évite toute exposition via getSaaSSettings_).
+// Accessible uniquement aux admins / godmode.
+/**
+ * Purge all expired SESSION_TOKEN_* entries from Script Properties.
+ * Each login writes one entry; stale ones never self-delete unless accessed.
+ * Returns { deleted, kept, errors }.
+ */
+function purgeExpiredSessionTokens_() {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const all = props.getProperties();
+    const now = Date.now();
+    let deleted = 0, kept = 0, errors = 0;
+    const toDelete = [];
+    Object.keys(all).forEach(function(key) {
+      if (!key.startsWith('SESSION_TOKEN_')) return;
+      try {
+        const rec = JSON.parse(all[key] || '{}');
+        const exp = Number(rec && rec.exp || 0);
+        // Delete if: no expiry field, already expired, or unparseable
+        if (!exp || now > exp) {
+          toDelete.push(key);
+        } else {
+          kept++;
+        }
+      } catch(_) {
+        toDelete.push(key); // corrupt record — remove it
+        errors++;
+      }
+    });
+    // Delete in batches of 20 to avoid quota issues
+    for (let i = 0; i < toDelete.length; i += 20) {
+      const batch = toDelete.slice(i, i + 20);
+      batch.forEach(function(k) {
+        try { props.deleteProperty(k); deleted++; } catch(_) { errors++; }
+      });
+    }
+    console.log('[purgeExpiredSessionTokens_] deleted=' + deleted + ' kept=' + kept + ' errors=' + errors);
+    return { success: true, deleted: deleted, kept: kept, errors: errors };
+  } catch(e) {
+    return { success: false, error: String(e && e.message || e) };
+  }
+}
+
+function saveAiApiKeys_(data, auth) {
+  const viewer = getViewerInfo_(auth);
+  if (!viewer || !viewer.success) return { success: false, error: 'Session invalide.' };
+  const isAdmin = viewer.isMaster || viewer.isGodMode ||
+    (viewer.permissions && (viewer.permissions.pa_save_settings || viewer.permissions.p_settings));
+  if (!isAdmin) return { success: false, error: 'Droits insuffisants.' };
+
+  const gemini = String((data && data.gemini) || '').trim();
+  const claude  = String((data && data.claude)  || '').trim();
+  if (!gemini && !claude) return { success: false, error: 'Aucune clé fournie.' };
+
+  // Clear space by purging expired session tokens before writing new keys.
+  try { purgeExpiredSessionTokens_(); } catch(_) {}
+
+  try {
+    const props = PropertiesService.getScriptProperties();
+    if (gemini) props.setProperty('GEMINI_API_KEY', gemini);
+    if (claude)  props.setProperty('ANTHROPIC_API_KEY', claude);
+    // Invalidate viewer cache so the next getViewerInfo_ picks up the new keys.
+    try {
+      const c = CacheService.getScriptCache();
+      if (c) c.remove('VIEWER_' + (viewer.token || ''));
+    } catch(_) {}
+    return {
+      success: true,
+      configured: { gemini: !!gemini, claude: !!claude }
+    };
+  } catch(e) {
+    return { success: false, error: String(e && e.message || 'Erreur inconnue') };
+  }
+}
+
+function updateSaaSSettings_(payload, token) {
+  if (!payload || typeof payload !== 'object') return { success: false, error: "Cle 'name' manquante." };
+
+  const entries = payload.name
+    ? [{ name: String(payload.name).trim(), value: payload.value }]
+    : Object.keys(payload)
+        .filter(key => !['token', 'auth', 'meta'].includes(String(key).toLowerCase()))
+        .map(key => ({ name: String(key).trim(), value: payload[key] }))
+        .filter(entry => !!entry.name);
+
+  if (!entries.length) return { success: false, error: "Cle 'name' manquante." };
+
+  const viewer = getViewerInfo_(token);
+  const hasSettingsPermission = viewer.success && (
+    viewer.isMaster ||
+    viewer.isGodMode ||
+    (viewer.permissions && (viewer.permissions.p_settings || viewer.permissions.pa_save_settings))
+  );
+  const bootstrapOwner = getBootstrapOwnerContext_();
+  const isBootstrapWrite = !hasSettingsPermission
+    && bootstrapOwner.isOwnerActiveUser
+    && entries.every(entry => isBootstrapSettingKeyAllowed_(entry.name));
+
+  if (!hasSettingsPermission && !isBootstrapWrite)
+    return { success: false, error: 'Droits insuffisants.' };
+
+  try {
+    // Validation : refuse de vider une clé requise (sauf bypass explicite)
+    if (!payload.allowEmptyRequired) {
+      const blocked = entries.filter(function(e){
+        return REQUIRED_SAAS_SETTING_KEYS_.indexOf(e.name) !== -1
+            && !_isSettingValuePresent_(e.value);
+      }).map(function(e){ return e.name; });
+      if (blocked.length) {
+        return {
+          success: false,
+          error: 'Clés essentielles ne peuvent être vidées : ' + blocked.join(', '),
+          blocked: blocked
+        };
+      }
+    }
+
+    const persisted = persistSettingsEntries_(entries);
+    const actor = hasSettingsPermission ? viewer.email : (bootstrapOwner.ownerEmail || bootstrapOwner.activeUserEmail || 'BOOTSTRAP_OWNER');
+    const action = isBootstrapWrite ? 'BOOTSTRAP_SETTING' : 'UPDATE_SETTING';
+    const perm = isBootstrapWrite ? 'BOOTSTRAP' : 'pa_save_settings';
+
+    // Fix 5: record old value alongside new value in the audit log so changes
+    // can be reviewed and reverted. Previously only wrote "Updated by <actor>".
+    // We read old values from the Settings sheet that persistSettingsEntries_
+    // already opened; a second read is cheaper than losing audit traceability.
+    var _oldSettingsMap = {};
+    try {
+      var _auditSh = getSS_().getSheetByName('Settings');
+      if (_auditSh && _auditSh.getLastRow() > 1) {
+        var _auditData = _auditSh.getDataRange().getValues();
+        for (var _ai = 1; _ai < _auditData.length; _ai++) {
+          var _ak = String(_auditData[_ai][0] || '').trim();
+          if (_ak) _oldSettingsMap[_ak] = String(_auditData[_ai][1] != null ? _auditData[_ai][1] : '');
+        }
+      }
+    } catch(_auditReadErr) { /* non-fatal — fall back to unknown */ }
+
+    entries.forEach(function(entry) {
+      var oldVal = _oldSettingsMap.hasOwnProperty(entry.name)
+        ? _oldSettingsMap[entry.name]
+        : '(not set)';
+      var newVal = entry.value !== null && typeof entry.value === 'object'
+        ? JSON.stringify(entry.value)
+        : String(entry.value != null ? entry.value : '');
+      // Truncate very long values (curriculum blobs etc.) so audit rows stay readable
+      var oldShort = oldVal.length > 120 ? oldVal.slice(0, 120) + '…' : oldVal;
+      var newShort = newVal.length > 120 ? newVal.slice(0, 120) + '…' : newVal;
+      var detail = 'Updated by ' + actor + ' | old: ' + oldShort + ' | new: ' + newShort;
+      writeAuditLog_(action, entry.name, detail, perm);
+    });
+    // Mirror ATTENDANCE_WATCHLIST writes to the AttendanceAlarms sheet so the
+    // alarms can be inspected/edited as a real sheet, not just a JSON blob.
+    try {
+      entries.forEach(function(entry){
+        if (String(entry.name) === 'ATTENDANCE_WATCHLIST' && typeof _mirrorAttendanceWatchlistToSheet_ === 'function') {
+          _mirrorAttendanceWatchlistToSheet_(entry.value);
+        }
+      });
+    } catch(_) { /* non-fatal */ }

@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { makeD1 } from './d1shim.mjs';
+import { storeSessionToken } from '../src/lib/session.js';
+import { calculateTeacherPayroll, saveTeacherPaymentMode, processPayrollBatch, getPayrollHistory } from '../src/actions/payroll.js';
+const dbPath=path.join(os.tmpdir(),'eduhaiti-payroll-test.sqlite'); try{fs.unlinkSync(dbPath)}catch{}
+const db=makeD1(dbPath); db._raw.exec(fs.readFileSync(new URL('../schema.sql',import.meta.url),'utf8')); db._raw.exec(fs.readFileSync(new URL('../migrations/0010_payroll.sql',import.meta.url),'utf8'));
+db._raw.prepare(`INSERT OR REPLACE INTO settings(key,value) VALUES('ORG_ID','ORG')`).run();
+const adminId=crypto.randomUUID();
+db._raw.prepare(`INSERT INTO users(id,user_id,email,name,role,password_hash,active,is_master,permissions_json) VALUES(?,?,?,?,?,?,?,?,?)`).run(adminId,'ADM1','admin@test.com','Admin','ADMIN','x',1,1,'{}');
+db._raw.prepare(`INSERT INTO users(id,user_id,email,name,role,password_hash,active,is_master,is_god_mode,permissions_json,pay_mode,pay_rate,pay_fixed_salary) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('u2','T1','teacher@test.com','Teacher','Teacher','x',1,0,0,'{}','',0,0);
+await storeSessionToken(db,'tok',{userId:adminId,email:'admin@test.com',role:'ADMIN'}); const auth={token:'tok'},env={DB:db,ORG_ID:'ORG'};
+db._raw.prepare(`INSERT INTO teacher_assignments(id,org_id,teacher_name,teacher_id,class_name,class_id,subject,day,start_time,end_time,hours,rate,salary,payment_mode,has_conflict,active,created_at,version,updated_at,meta_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('a1','ORG','Teacher','T1','Class','C1','Math','Monday','08:00','10:00',2,20,0,'HOURLY',0,1,'2026-01-01',1,'2026-01-01','{}');
+db._raw.prepare(`INSERT INTO attendance(id,student_id,org_id,grade_level_id,date,status,recorded_by,meta_json,version,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`).run('att1','teacher@test.com','ORG','STAFF','2026-09-14','PRESENT','teacher@test.com',JSON.stringify({type:'STAFF',checkIn:'08:15:00',checkOut:'09:45:00'}),1,'2026-09-14T10:00:00Z');
+const calc=await calculateTeacherPayroll({startDate:'2026-09-14',endDate:'2026-09-14'},auth,env); assert.equal(calc.success,true); const teacher=calc.teachers.find(x=>x.teacherId==='T1'); assert.ok(teacher); assert.equal(teacher.baseSalary,30); assert.equal(teacher.deductions,10);
+const mode=await saveTeacherPaymentMode({assignmentId:'a1',paymentMode:'FIXED'},auth,env); assert.equal(mode.success,true); assert.equal(mode.updated,1);
+const batch=await processPayrollBatch({batch:[{teacherId:'T1',name:'Teacher',month:'2026-09',periodStart:'2026-09-01',periodEnd:'2026-09-30',baseSalary:100,deductions:0,netSalary:100,processedBy:'admin@test.com'}]},auth,env); assert.equal(batch.count,1);
+const dup=await processPayrollBatch({batch:[{teacherId:'T1',name:'Teacher',month:'2026-09',periodStart:'2026-09-10',periodEnd:'2026-09-20',baseSalary:100,netSalary:100}]},auth,env); assert.equal(dup.count,0); assert.equal(dup.skipped.length,1);
+const hist=await getPayrollHistory({},auth,env); assert.equal(hist.records.length,1); console.log('payroll tests passed');

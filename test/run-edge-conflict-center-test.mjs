@@ -1,0 +1,17 @@
+import fs from 'node:fs';
+const edge=fs.readFileSync(new URL('../edge/eduhaiti-edge.mjs',import.meta.url),'utf8');
+const front=fs.readFileSync(new URL('../frontend-dist/edge-first.js',import.meta.url),'utf8');
+const typed=fs.readFileSync(new URL('../src/lib/typedSync.js',import.meta.url),'utf8');
+if(!edge.includes("CONFLICTS_FILE")) throw new Error('conflict store missing');
+if(!edge.includes("'/edge/conflicts'")) throw new Error('conflict list endpoint missing');
+if(!edge.includes("'/edge/conflicts/resolve'")) throw new Error('conflict resolve endpoint missing');
+if(!edge.includes("resolution==='cloud'")) throw new Error('cloud resolution missing');
+if(!edge.includes("resolution==='manual'")) throw new Error('manual resolution missing');
+if(!edge.includes("recordConflict(outcome, original, item.id)")) throw new Error('conflict recording missing');
+if(!typed.includes('serverRow: businessExisting')) throw new Error('attendance server row missing');
+if(!typed.includes('serverRow: existing')) throw new Error('strict server row missing');
+if(!front.includes('edu-edge-conflicts')) throw new Error('conflict center button missing');
+if(!front.includes('Conserver Cloud')) throw new Error('cloud action missing');
+if(!front.includes('Conserver local')) throw new Error('local action missing');
+if(!front.includes('Résoudre manuellement')) throw new Error('manual action missing');
+console.log('edge conflict center + resolution controls: PASS');

@@ -1,0 +1,32 @@
+name: Provision schools
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run provision:pending
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Persist tenant configuration
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "Eduflow Provisioner"
+          git config user.email "actions@users.noreply.github.com"
+          git add wrangler.toml src/lib/tenants.js
+          git commit -m "provision new school tenants"
+          git push

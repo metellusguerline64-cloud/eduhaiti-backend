@@ -1,0 +1,243 @@
+    switch (action) {
+
+      // ── SETTINGS & IDENTITY ───────────────────────────────────────────────
+      case 'getViewerInfo':             result = viewer; break;
+      case 'getSaaSSettings':
+      case 'getSettings':               result = getSaaSSettings_(auth); break;
+      case 'updateSaaSSettings':
+      case 'updateLocalSettings':       result = updateSaaSSettings_(data, auth); break;
+      case 'getSettingsHealth':         result = getSaaSSettingsHealth_({ cleanup:false }); break;
+      case 'cleanupSettingsDuplicates': result = getSaaSSettingsHealth_({ cleanup:true }); break;
+      case 'updateStudentPortalUrl':    result = updateStudentPortalUrlInRegister_(data, auth); break;
+      case 'uploadLogoToDriveSecure':   result = uploadLogoToDriveSecure_(data, auth); break;
+      case 'uploadPwaScreenshotToDriveSecure': result = uploadPwaScreenshotToDriveSecure_(data, auth); break;
+      case 'saveUserTheme':             result = saveUserTheme_(data); break;
+
+      // ── PATCH: updateMyProfilePhoto avec flush + cache invalidation ───────
+      case 'updateMyProfilePhoto':      result = updateMyProfilePhoto_PATCHED_(data, auth); break;
+
+      case 'clearMeigensConfiguration': result = clearMeigensConfiguration_(); break;
+      case 'getTimetableData':          result = getTimetableData_(); break;
+      case 'saveTimetableData':         result = saveTimetableData_(data); break;
+      case 'getSubjectsByLevel':        result = getSubjectsByLevel_(data && data.level ? data.level : data); break;
+      case 'saveChunkedCurriculum':     result = saveChunkedCurriculum_(data, auth); break;
+
+      // ── STAFF / USERS ─────────────────────────────────────────────────────
+      case 'getAllAdminUsers':          result = getAllAdminUsers_(auth); break;
+      case 'getStaffList':              result = getStaffList_(); break;
+      case 'saveStaffAccess':           result = saveStaffAccess_(data); break;
+      case 'updateUserRoleAndPerms':    result = updateUserRoleAndPerms_(data); break;
+      case 'getStaffManagementData':    result = getStaffManagementData_(auth); break;
+      case 'toggleUserActiveState':     result = toggleUserActiveState_(data.email || data.userId, _resolveActiveStatusFlag_(data)); break;
+      case 'removeUserAccess':          result = removeUserAccess_(typeof data === 'string' ? data : (data.email || data.userId)); break;
+      case 'resetUserPassword':         result = resetUserPassword_(data); break;
+      case 'toggleGodMode':             result = toggleGodMode_(data, auth); break;
+      case 'getStaffAttendance':        result = getStaffAttendance_(data); break;
+      case 'clockInStaff':              result = clockInStaff_(data); break;
+
+      // ── STUDENTS ──────────────────────────────────────────────────────────
+      case 'getAllStudents': {
+        result = getAllStudents_(auth);
+        // FIX: getAllStudents_ correctly returns [] (success:true) when a
+        // strict-scope viewer (pt_enter_grades, pt_mark_attendance, etc.)
+        // has no configured class/subject scope and no broader admin/staff
+        // permission — filterStudentsByViewerScope_'s intentional deny-by-
+        // default. But an empty array looks identical to "this school
+        // genuinely has zero students" to every caller, including the
+        // frontend, which was silently no-op'ing on it (see
+        // applyStudentsFromApi_ in school.html) — so the teacher just saw a
+        // blank roster with no explanation. Attach a diagnostic reason in
+        // that specific case so the client can show it instead of guessing.
+        if (Array.isArray(result) && result.length === 0 && !viewer.isMaster && !viewer.isGodMode) {
+          const _p = viewer.permissions || {};
+          const _requiresScope = STRICT_STUDENT_SCOPE_PERMISSION_KEYS_.some(function(k) { return !!_p[k]; });
+          const _hasBroadAccess = ['p_dossier','p_staff','p_audit','pa_add_student','pa_edit_student','pa_promote_student']
+            .some(function(k) { return !!_p[k]; });
+          const _scope = parseViewerAccessScope_(viewer.assignedSubjects || _p.assignedSubjects);
+          if (_requiresScope && !_scope.restricted && !_hasBroadAccess) {
+            result = {
+              success: true,
+              data: [],
+              scopeWarning: "Aucune classe ne vous a été assignée pour le moment. Demandez à un administrateur de vous affecter à une classe (écran Affectation, ou restriction d'accès du compte)."
+            };
+          }
+        }
+        break;
+      }
+      case 'getPromotionOverview':      result = getPromotionOverview_(data, auth); break;
+      case 'getStudent':               result = getStudentById_(data, auth); break;
+      case 'addNewStudent':             result = addNewStudent_(data); break;
+      case 'updateStudent':             result = updateStudent_(data, auth); break;
+      case 'resetStudentPin':           result = resetStudentPin_(data, auth); break;
+      case 'lookupStudentGlobal':       result = lookupStudentGlobal_(typeof data === 'string' ? data : data.id || data, auth); break;
+      case 'searchStudents':            result = searchStudents_(data, auth); break;
+      case 'getStudentFieldsConfig':    result = getStudentFieldsConfig_(); break;
+
+      // ── PATCH: getStudentHistory avec fallback auto-généré ────────────────
+      case 'getStudentHistory':         result = getStudentHistory_PATCHED_(data, auth); break;
+
+      case 'getAvailableAcademicYears': result = getAvailableAcademicYears_(); break;
+      case 'saveMedicalRecord':         result = saveMedicalRecord_(data, auth); break;
+      case 'saveDocumentSignature':     result = saveDocumentSignature_(data, auth); break;
+      case 'addInternalNote':           result = addInternalNote_(data, auth); break;
+      case 'getInternalNotes':          result = getInternalNotes_(data, auth); break;
+
+      // ── FINANCE ───────────────────────────────────────────────────────────
+      case 'getStudentPayments':
+      case 'getPayments':               result = getStudentPayments_(data, auth); break;
+      case 'verifyPaymentByClientRequestId': result = verifyPaymentByClientRequestId_(data, auth); break;
+      case 'approveOnlinePayment':      result = approveOnlinePayment_(data, auth); break;
+      case 'rejectOnlinePayment':       result = rejectOnlinePayment_(data, auth); break;
+      case 'getPendingOnlinePayments':  result = getPendingOnlinePayments_(data, auth); break;
+      case 'submitOnlinePayment':       result = submitOnlinePayment_(data, auth); break;
+      case 'getMyOnlinePaymentRequests':result = getMyOnlinePaymentRequests_(data, auth); break;
+      case 'recordNewPayment':          result = recordNewPayment_(data, auth); break;
+      case 'voidPayment':               result = voidPayment_(data, auth); break;
+      case 'editPayment':               result = editPayment_(data, auth); break;
+
+      // ── PATCH: getStudentFinanceProfile avec calcul unifié ────────────────
+      case 'getStudentFinanceSummary':
+      case 'getStudentFinanceProfile':  result = getStudentFinanceProfile_PATCHED_(
+                                          typeof data === 'string' ? data : (data && data.id ? data.id : data), auth
+                                        ); break;
+
+      case 'processPayrollBatch':       result = processPayrollBatch_(data); break;
+      case 'calculateTeacherPayroll':   result = calculateTeacherPayroll_(data); break;
+      case 'saveTeacherPaymentMode':    result = saveTeacherPaymentMode_(data); break;
+      case 'getPayrollHistory':         result = getPayrollHistory_(); break;
+
+      // ── PATCH: getDashboardLiveStats avec calcul unifié ───────────────────
+      case 'getDashboardLiveStats':     result = getDashboardLiveStats_PATCHED_(auth); break;
+
+      // ── ATTENDANCE ────────────────────────────────────────────────────────
+      case 'getAttendanceStats':        result = getAttendanceStats_(auth); break;
+      case 'recordBulkAttendance':      result = recordBulkAttendance_(data, auth); break;
+      case 'getAttendance':             result = getAttendanceForStudent_(data, auth); break;
+      case 'getAttendanceByDate':       result = getAttendanceByDate_(data); break;
+      case 'recordStudentAttendance':   result = recordStudentAttendance_(data); break;
+      case 'recordTransportAttendance': result = recordTransportAttendance_(data, auth); break;
+      case 'getStudentAttendance':      result = getStudentAttendance_(
+                                          typeof data === 'string' ? data : (data && data.studentId ? data.studentId : data), auth
+                                        ); break;
+      case 'getStudentAttendanceStats': result = getStudentAttendanceStats_(
+                                          typeof data === 'string' ? data : (data && data.studentId ? data.studentId : data), auth
+                                        ); break;
+      case 'getStudentInternalNotes':   result = getStudentInternalNotes_(
+                                          typeof data === 'string' ? data : (data && data.studentId ? data.studentId : data), auth
+                                        ); break;
+      case 'addStudentInternalNote':    result = addStudentInternalNote_(data, auth); break;
+      case 'recordAttendance':          result = recordAttendance_(data, auth); break;
+
+      // ── GRADES / BULLETINS ────────────────────────────────────────────────
+      case 'generateFullStudentReport': result = generateFullStudentReport_(data, auth); break;
+      case 'getStudentBulletinData':    result = getStudentBulletinData_(data, auth); break;
+      case 'checkStudentBulletinDownloadAllowed': result = checkStudentBulletinDownloadAllowed_(data, auth); break;
+      case 'getGrades':                 result = getGrades_(data, auth); break;
+      case 'getStudentScores':
+        result = getStudentScores_(
+          typeof data === 'string' ? data : (data && data.id ? data.id : data),
+          data && data.targetYear ? data.targetYear : '',
+          data && data.historyId ? data.historyId : ''
+        );
+        break;
+      case 'saveManualExamGrade':       result = saveManualExamGrade_(data); break;
+      case 'saveMaternalMentions':      result = saveMaternalMentions_(data); break;
+      case 'generateStudentAiAppreciation': result = generateStudentAiAppreciation_(data, auth); break;
+      case 'saveStudentAiAppreciation':     result = saveStudentAiAppreciation_(data, auth); break;
+      case 'getStudentAiAppreciation':      result = getStudentAiAppreciation_(data, auth); break;
+      case 'getMaternalCurriculumChecks': result = getMaternalCurriculumChecks_(data); break;
+      case 'saveMaternalCurriculumCheck': result = saveMaternalCurriculumCheck_(data); break;
+      case 'getAvailableExams':         result = getAvailableExams_(); break;
+      case 'getExistingGrade':          result = getExistingGrade_(data.studentCode, data.examTitle); break;
+      case 'updateGradeSubjects':       result = updateGradeSubjects_(data); break;
+      case 'addQuizQuestion':           result = addQuizQuestion_(data); break;
+      case 'getQuizQuestions':          result = getQuizQuestions_(
+                                          typeof data === 'string' ? data : (data && data.examTitle ? data.examTitle : data)
+                                        ); break;
+      case 'updateExamSettings':        result = updateExamSettings_(data); break;
+
+      // ── AI / MESSAGING ────────────────────────────────────────────────────
+      case 'classifyAiIntent':          result = classifyAiIntent_(data, auth); break;
+      case 'processUserMessage':        result = processUserMessage_(data, auth); break;
+      case 'getAiTokenStatus':          result = getAiTokenStatus_(data, auth); break;
+      case 'getDirectAiKey':            result = getDirectAiKey_(data, auth); break;
+      case 'checkAiQuota':              result = checkAiQuota_(data, auth); break;
+      case 'recordAiDirectTokenUsage':  result = recordAiDirectTokenUsage_(data, auth); break;
+      case 'resetAiTokenLog':           result = resetAiTokenLog_(data, auth); break;
+      case 'setUserAiApiKey':           result = setUserAiApiKey_(data, auth); break;
+      case 'getUserAiApiKeyStatus':     result = getUserAiApiKeyStatus_(data, auth); break;
+      case 'verifyUserAiApiKey':        result = verifyUserAiApiKey_(data, auth); break;
+      case 'translateMeigensText':      result = translateMeigensText_(data.text, data.lang); break;
+      case 'publishAnnouncement':       result = publishAnnouncement_(data, auth); break;
+      case 'sendInternalMessage':       result = sendInternalMessage_(data, auth); break;
+      case 'sendSMSBulk':               result = sendSMSBulk_(data, auth); break;
+      case 'testSMSConnection':         result = testSMSConnection_(data, auth); break;
+      case 'sendStudentReportEmail':    result = sendStudentReportEmail_(data, auth); break;
+
+      // ── PATCH: WhatsApp API ───────────────────────────────────────────────
+      case 'sendWhatsApp':              result = sendWhatsAppMessage_(data, auth); break;
+
+      // ── PROMOTION ─────────────────────────────────────────────────────────
+      case 'getPromotionDecision':      result = getPromotionDecision_(data); break;
+      case 'processPromotionDecision':  result = processPromotionDecision_(data); break;
+
+      // ── AUDIT / ANALYTICS ─────────────────────────────────────────────────
+      case 'getGlobalAuditDashboard':
+      case 'getAuditLogs':              result = getAuditLogs(auth, data || {}); break;
+      case 'getAuditDiagnostics':       result = getAuditDiagnostics(); break;
+      case 'getImmersiveData':          result = getImmersiveData_(data, auth); break;
+      // ── Exam Builder / Runner / Grading ───────────────────────────────────
+      case 'saveExam':                  result = examSave_(data, auth); break;
+      case 'listExams':                 result = examList_(data, auth); break;
+      case 'getExam':                   result = examGet_(data, auth); break;
+      case 'deleteExam':                result = examDelete_(data, auth); break;
+      case 'publishExam':               result = examPublish_(data, auth); break;
+      case 'listExamSubmissions':       result = examListSubmissions_(data, auth); break;
+      case 'getExamSubmission':         result = examGetSubmission_(data, auth); break;
+      case 'gradeExamSubmission':       result = examGradeSubmission_(data, auth); break;
+      case 'listStudentExams':          result = examListForStudent_(data, auth); break;
+      case 'startStudentExam':          result = examStartForStudent_(data, auth); break;
+      case 'saveExamProgress':          result = examSaveProgress_(data, auth); break;
+      case 'submitStudentExam':         result = examSubmitForStudent_(data, auth); break;
+      case 'getStudentExamResult':      result = examGetStudentResult_(data, auth); break;
+      // ── Phase 1/2 additions ──────────────────────────────────────────────
+      case 'getStudentClassRank':       result = getStudentClassRank_(data, auth); break;
+      case 'getMySchoolId':             result = getMySchoolId_(data, auth); break;
+      // ── Media Library ─────────────────────────────────────────────────────
+      case 'listMedia':                 result = mediaList_(data, auth); break;
+      case 'saveMedia':                 result = mediaSave_(data, auth); break;
+      case 'deleteMedia':               result = mediaDelete_(data, auth); break;
+      case 'uploadMediaFile':           result = mediaUpload_(data, auth); break;
+      // ── Homework ──────────────────────────────────────────────────────────
+      case 'listHomework':              result = homeworkList_(data, auth); break;
+      case 'saveHomework':              result = homeworkSave_(data, auth); break;
+      case 'deleteHomework':            result = homeworkDelete_(data, auth); break;
+      case 'gradeHomework':             result = homeworkGrade_(data, auth); break;
+      case 'getHomeworkGrades':         result = homeworkGetGrades_(data, auth); break;
+      case 'convertHomeworkToExam':     result = homeworkConvertToExam_(data, auth); break;
+      case 'listStudentHomework':       result = homeworkListForStudent_(data, auth); break;
+      case 'getStudentHomeworkBulletin':result = homeworkStudentBulletin_(data, auth); break;
+      case 'getComplexReportData':      result = getComplexReportData_(data, auth); break;
+      case 'getUniversalAnalytics':     result = getUniversalAnalytics_(data, auth); break;
+      case 'getClassComparisonData':    result = getClassComparisonData_(data, auth); break;
+      case 'reportSecurityIncident':    result = reportSecurityIncident_(data, auth); break;
+      // ── Groupe B (portail élève) ────────────────────────────────────────
+      case 'getAnnouncementsForStudent':result = getAnnouncementsForStudent_(data, auth); break;
+      case 'getAnnouncementsList':      result = getAnnouncementsList_(data, auth); break;
+      case 'deleteAnnouncement':        result = deleteAnnouncement_(data, auth); break;
+      case 'getStudentIncidents':       result = getStudentIncidents_(data, auth); break;
+      case 'getIncidentsForStudent':    result = getIncidentsForStudent_(data, auth); break;
+      case 'getIncidentsList':          result = getIncidentsList_(data, auth); break;
+      case 'sendMessageToAdmin':        result = sendMessageToAdmin_(data, auth); break;
+      case 'getMyAdminMessages':        result = getMyAdminMessages_(data, auth); break;
+      case 'getAdminMessagesInbox':     result = getAdminMessagesInbox_(data, auth); break;
+      case 'replyToAdminMessage':       result = replyToAdminMessage_(data, auth); break;
+      case 'setParentReplyPermission':  result = setParentReplyPermission_(data, auth); break;
+      case 'generateReportDownloadUrl': result = generateReportDownloadUrl_(data, auth); break;
+
+      // ── PATCH: Alertes système ────────────────────────────────────────────
+      case 'getSystemAlerts':           result = getSystemAlerts_(auth); break;
+      case 'getNotifications':          result = getNotifications_(data, auth); break;
+      case 'markNotificationRead':      result = markNotificationRead_(data, auth); break;
+      case 'markAllNotificationsRead':  result = markAllNotificationsRead_(data, auth); break;
+      case 'confirmTeacherAlertStatus': result = confirmTeacherAlertStatus_(data, auth); break;

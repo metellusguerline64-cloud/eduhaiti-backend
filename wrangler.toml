@@ -1,0 +1,108 @@
+name = "eduhaiti-api"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Multi-tenant: one D1 database per school, one [[d1_databases]] block per
+# school below, binding name matching src/lib/tenants.js's TENANTS table.
+# To onboard a new school, see the comment at the top of that file.
+[[d1_databases]]
+binding = "DB_MT1967"
+database_name = "eduhaiti-db"
+database_id = "2e263bc7-02b9-42d2-a90f-948dea836d9c"
+
+# SCHOOL_D1_BINDINGS_START
+[[d1_databases]]
+binding = "DB_TEST1"
+database_name = "eduhaiti-db-test1"
+database_id = "01520619-f59c-48a8-be22-050f0284c67a"
+
+# SCHOOL_D1_BINDINGS_END
+
+# Next school, once created:
+# [[d1_databases]]
+# binding = "DB_STMARC"
+# database_name = "eduhaiti-db-stmarc"
+# database_id = "REPLACE_WITH_ITS_D1_DATABASE_ID"
+
+# Control-plane database — ONE shared database across every org (schools,
+# churches, businesses...), replacing the Google Sheets "Register"/
+# MASTER_AUTH_ID spreadsheet. Holds only the `orgs` registry (see
+# master-schema.sql) — never school data. registerAccount/fetchConfig/
+# checkSubdomainAvailable (src/actions/accounts.js) are the only things
+# that touch it; they run pre-tenant, before resolveTenantFromRequest
+# (see ACCOUNT_ACTIONS in src/index.js).
+[[d1_databases]]
+binding = "MASTER_DB"
+database_name = "meigens-master-db"
+	database_id = "97812977-c5e1-43ca-be11-01cfa6a85f7b"
+
+# Generated_IDs → students sync (src/lib/generatedIdsSync.js), replacing
+# Code.gs's ScriptApp trigger. Runs every 10 minutes, same cadence as the
+# original CacheService throttle stamp.
+[triggers]
+crons = ["*/10 * * * *", "17 2 * * *"]
+
+# One Worker now serves every school (src/lib/tenants.js resolves which
+# one per request by subdomain) — ORG_ID is therefore NOT a static var
+# anymore; it's set per-request from TENANTS.
+#
+# MASTER_AUTH_ID — NOT the Register spreadsheet anymore (that's retired;
+# see MASTER_DB/orgs above). This is now ONLY the Google Sheet ID holding
+# each school's own "Generated_IDs" intake tab, read directly by
+# src/lib/generatedIdsSync.js (env.MASTER_AUTH_ID is passed straight to
+# fetchSheetValues as the spreadsheet id — no Register-sheet lookup step
+# ever existed in the actual code, despite what an earlier version of this
+# comment implied). This is the one Google Sheets dependency still left in
+# the app, kept deliberately out of this session's scope (school/tenant
+# account creation) — planned to go away once student registration moves
+# off Generated_IDs onto a Worker-native action, same as accounts.js did
+# for school signup.
+[vars]
+MASTER_AUTH_ID = "REPLACE_WITH_GENERATED_IDS_SPREADSHEET_ID"
+
+# Secrets (never put these in [vars] / source control):
+#   npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_EMAIL
+#   npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY
+# The service account needs Viewer access shared on MASTER_AUTH_ID (the
+# Generated_IDs sheet) so the Worker can read it the same way
+# SpreadsheetApp did in Code.gs/SW.txt. Not needed at all once Generated_IDs
+# is migrated off Sheets — see the note above.
+#
+#   npx wrangler secret put BADGE_INGEST_KEY
+# Shared secret checked by the seedBadgeStudents action
+# (src/actions/badgeSeed.js) — the badge-generation GAS script sends this
+# back as data.apiKey on every POST. It's a static secret, not a session
+# token, because a scheduled/triggered GAS function has no logged-in
+# staff member behind it. Same value must be pasted into the GAS-side
+# BADGE_INGEST_KEY constant. Rotate by setting a new secret + updating GAS
+# in the same change.
+
+# Wildcard route: every school's subdomain hits this one Worker, which
+# then picks the right D1 database via the Host header (see lib/tenants.js).
+[[routes]]
+pattern = "*.eduflow.win/api/*"
+zone_name = "eduflow.win"
+
+[[routes]]
+pattern = "*.eduflow.win/api"
+zone_name = "eduflow.win"
+
+# Optional Worker-native R2 storage for media uploads.
+# [[r2_buckets]]
+# binding = "MEDIA_BUCKET"
+# bucket_name = "eduhaiti-media"
+#
+# Dedicated R2 bucket for D1 backups. Recommended so backups are isolated
+# from user-uploaded media.
+# [[r2_buckets]]
+# binding = "BACKUP_BUCKET"
+# bucket_name = "eduhaiti-backups"
+# Backups are written under backups/<ORG_ID>/YYYY-MM-DD...json.gz
+
+# MonCash — one deployment-wide encryption key protects each tenant's
+# encrypted MONCASH_CONFIG_ENC value in its own D1. Never place this in [vars].
+#   npx wrangler secret put MONCASH_CREDENTIALS_KEY
+#   npx wrangler secret put AI_USER_CONFIG_KEY
+# Encrypts per-user AI provider keys before they are stored in D1.
+#   npx wrangler secret put ANTHROPIC_API_KEY
+# Used only by the legacy admin direct-AI-key contract.

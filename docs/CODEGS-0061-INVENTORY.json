@@ -1,0 +1,2053 @@
+{
+  "source": "/mnt/data/source/Code.gs.txt",
+  "generatedAt": "2026-09-17T04:38:58.292Z",
+  "summary": {
+    "À PORTER": 52,
+    "PORTÉ": 190
+  },
+  "byDomain": {
+    "Portail parent": {
+      "total": 11,
+      "ported": 1,
+      "remaining": 10,
+      "actions": [
+        "activateParentAccount",
+        "checkParentPhoneStatus",
+        "getParentAnnouncements",
+        "getParentChildIncidents",
+        "getParentChildren",
+        "getParentPendingRequests",
+        "parentPortalLogin",
+        "parentPortalLoginV2",
+        "resolveParentRequest",
+        "setParentReplyPermission",
+        "submitParentRegistrationRequest"
+      ]
+    },
+    "Autres": {
+      "total": 12,
+      "ported": 8,
+      "remaining": 4,
+      "actions": [
+        "addInternalNote",
+        "attemptSheetLogin",
+        "checkAndUpdateAccountStatus",
+        "getClassComparisonData",
+        "getDownloadPageData",
+        "getIncidentsList",
+        "getInternalNotes",
+        "getUnifiedDirectory",
+        "getViewerInfo",
+        "purgeExpiredTokens",
+        "saveMaternalMentions",
+        "saveMedicalRecord"
+      ]
+    },
+    "Élèves": {
+      "total": 54,
+      "ported": 44,
+      "remaining": 10,
+      "actions": [
+        "addNewStudent",
+        "addStudentInternalNote",
+        "checkStudentBulletinDownloadAllowed",
+        "dropStudent",
+        "enrollStudent",
+        "generateFullStudentReport",
+        "generateStudentAiAppreciation",
+        "getActiveEnrollment",
+        "getAllStudents",
+        "getAnnouncementsForStudent",
+        "getEnrollmentsByClass",
+        "getIncidentsForStudent",
+        "getPromotionDecision",
+        "getPromotionOverview",
+        "getStudent",
+        "getStudentAiAppreciation",
+        "getStudentAttendance",
+        "getStudentAttendanceStats",
+        "getStudentBulletinData",
+        "getStudentClassRank",
+        "getStudentExamResult",
+        "getStudentFieldsConfig",
+        "getStudentFinanceProfile",
+        "getStudentFinanceSummary",
+        "getStudentHistory",
+        "getStudentHomeworkBulletin",
+        "getStudentIncidents",
+        "getStudentInternalNotes",
+        "getStudentPayments",
+        "getStudentScores",
+        "listStudentExams",
+        "listStudentHomework",
+        "loginWithIdAndPin",
+        "lookupStudentGlobal",
+        "ping",
+        "processPromotionDecision",
+        "reEnrollStudent",
+        "recordStudentAttendance",
+        "registerBulletinIssue",
+        "resetStudentPin",
+        "saveStudentAiAppreciation",
+        "searchStudents",
+        "sendStudentReportEmail",
+        "setupInitialPin",
+        "setupParentPin",
+        "setupStaffPin",
+        "startStudentExam",
+        "studentPortalLogin",
+        "submitStudentExam",
+        "updateStudent",
+        "updateStudentHistory",
+        "updateStudentPortalUrl",
+        "verifyBulletin",
+        "verifyStudentByLast4"
+      ]
+    },
+    "Notes / Examens": {
+      "total": 29,
+      "ported": 29,
+      "remaining": 0,
+      "actions": [
+        "addQuizQuestion",
+        "convertHomeworkToExam",
+        "createSubject",
+        "deleteExam",
+        "deleteHomework",
+        "deleteSubject",
+        "getAvailableExams",
+        "getExam",
+        "getExamSubmission",
+        "getExistingGrade",
+        "getGrades",
+        "getHomeworkGrades",
+        "getMaternalCurriculumChecks",
+        "getQuizQuestions",
+        "getSubjectsByLevel",
+        "gradeExamSubmission",
+        "gradeHomework",
+        "listExamSubmissions",
+        "listExams",
+        "listHomework",
+        "publishExam",
+        "saveChunkedCurriculum",
+        "saveExam",
+        "saveExamProgress",
+        "saveHomework",
+        "saveManualExamGrade",
+        "saveMaternalCurriculumCheck",
+        "updateExamSettings",
+        "updateGradeSubjects"
+      ]
+    },
+    "École / Paramètres": {
+      "total": 28,
+      "ported": 18,
+      "remaining": 10,
+      "actions": [
+        "appendSchoolIdRecord",
+        "checkAndInitSheets",
+        "checkCacheHealth",
+        "cleanupSettingsDuplicates",
+        "clearAllSchoolCaches",
+        "clearMeigensConfiguration",
+        "createSaaSBackup",
+        "ensureSchoolIdsSheet",
+        "getAcademicYearRolloverStatus",
+        "getMySchoolId",
+        "getSaaSSettings",
+        "getSchoolIds",
+        "getSchoolIdsRecords",
+        "getSettings",
+        "getSettingsHealth",
+        "initSchoolIdsSheet",
+        "initSheets",
+        "initializeSheetHeaders",
+        "listSchoolIds",
+        "resetAcademicYearRollover",
+        "rolloverAcademicYear",
+        "runGlobalBackupTask",
+        "saveSchoolIdRecord",
+        "updateLocalSettings",
+        "updateSaaSSettings",
+        "updateSchoolIdRecord",
+        "upsertSchoolIdRecord",
+        "warmSchoolCaches"
+      ]
+    },
+    "Finance / Paiements": {
+      "total": 13,
+      "ported": 13,
+      "remaining": 0,
+      "actions": [
+        "approveOnlinePayment",
+        "editPayment",
+        "getMyOnlinePaymentRequests",
+        "getPayments",
+        "getPayrollHistory",
+        "getPendingOnlinePayments",
+        "processPayrollBatch",
+        "recordNewPayment",
+        "rejectOnlinePayment",
+        "saveTeacherPaymentMode",
+        "submitOnlinePayment",
+        "verifyPaymentByClientRequestId",
+        "voidPayment"
+      ]
+    },
+    "Présences": {
+      "total": 13,
+      "ported": 11,
+      "remaining": 2,
+      "actions": [
+        "calculateTeacherPayroll",
+        "clockInStaff",
+        "getAttendance",
+        "getAttendanceByDate",
+        "getAttendanceStats",
+        "getParentChildAttendance",
+        "getStaffAttendance",
+        "handleTemplateUpload",
+        "notifyLateStaff",
+        "recordAttendance",
+        "recordBulkAttendance",
+        "recordTransportAttendance",
+        "translateMeigensText"
+      ]
+    },
+    "IA": {
+      "total": 23,
+      "ported": 15,
+      "remaining": 8,
+      "actions": [
+        "checkAiQuota",
+        "classifyAiIntent",
+        "ensureAiConfigurationLibrarySheets",
+        "forceInitAiMasterSheets",
+        "getAiChatConversation",
+        "getAiChatConversationList",
+        "getAiChatLibraryStatus",
+        "getAiConfigurationAssistanceContext",
+        "getAiTokenStatus",
+        "getAvailableAcademicYears",
+        "getDirectAiKey",
+        "getUserAiApiKeyStatus",
+        "initAiConfigurationLibrary",
+        "initAiMasterSheets",
+        "recordAiDirectTokenUsage",
+        "resetAiChatConversation",
+        "resetAiTokenLog",
+        "resetAiTokenSession",
+        "saveAiApiKeys",
+        "sendEmailVerification",
+        "setUserAiApiKey",
+        "verifyEmailOTP",
+        "verifyUserAiApiKey"
+      ]
+    },
+    "Audit / Sécurité": {
+      "total": 11,
+      "ported": 6,
+      "remaining": 5,
+      "actions": [
+        "confirmTeacherAlertStatus",
+        "diagnoseSyncIssue",
+        "getAuditDiagnostics",
+        "getAuditLogs",
+        "getGlobalAuditDashboard",
+        "getSystemAlerts",
+        "logAudit",
+        "reportSecurityIncident",
+        "runAuditMigration",
+        "writeAuditLog",
+        "writeAuditLog_"
+      ]
+    },
+    "Communication": {
+      "total": 15,
+      "ported": 15,
+      "remaining": 0,
+      "actions": [
+        "deleteAnnouncement",
+        "getAdminMessagesInbox",
+        "getAnnouncementsList",
+        "getMyAdminMessages",
+        "getNotifications",
+        "markAllNotificationsRead",
+        "markNotificationRead",
+        "processUserMessage",
+        "publishAnnouncement",
+        "replyToAdminMessage",
+        "sendInternalMessage",
+        "sendMessageToAdmin",
+        "sendSMSBulk",
+        "sendWhatsApp",
+        "testSMSConnection"
+      ]
+    },
+    "Médias / Documents": {
+      "total": 7,
+      "ported": 7,
+      "remaining": 0,
+      "actions": [
+        "deleteMedia",
+        "listMedia",
+        "saveDocumentSignature",
+        "saveMedia",
+        "uploadLogoToDriveSecure",
+        "uploadMediaFile",
+        "uploadPwaScreenshotToDriveSecure"
+      ]
+    },
+    "Emploi du temps / Affectations": {
+      "total": 5,
+      "ported": 5,
+      "remaining": 0,
+      "actions": [
+        "deleteStaffAssignment",
+        "getStaffAssignments",
+        "getTimetableData",
+        "saveStaffAssignment",
+        "saveTimetableData"
+      ]
+    },
+    "Utilisateurs / Administration": {
+      "total": 13,
+      "ported": 12,
+      "remaining": 1,
+      "actions": [
+        "forcePasswordUpdate",
+        "getAllAdminUsers",
+        "getStaffList",
+        "getStaffManagementData",
+        "grantBackupServiceAccess",
+        "removeUserAccess",
+        "resetUserPassword",
+        "saveStaffAccess",
+        "saveUserTheme",
+        "toggleGodMode",
+        "toggleUserActiveState",
+        "updateMyProfilePhoto",
+        "updateUserRoleAndPerms"
+      ]
+    },
+    "Rapports / Analytics": {
+      "total": 6,
+      "ported": 6,
+      "remaining": 0,
+      "actions": [
+        "generateReportDownloadUrl",
+        "getComplexReportData",
+        "getDashboardLiveStats",
+        "getImmersiveData",
+        "getUniversalAnalytics",
+        "logReportGenerated"
+      ]
+    },
+    "Kiosque": {
+      "total": 2,
+      "ported": 0,
+      "remaining": 2,
+      "actions": [
+        "getKioskWatchCodes",
+        "saveKioskWatchCodes"
+      ]
+    }
+  },
+  "actions": [
+    {
+      "action": "activateParentAccount",
+      "domain": "Portail parent",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "addInternalNote",
+      "domain": "Autres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "addNewStudent",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "addQuizQuestion",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "addStudentInternalNote",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "appendSchoolIdRecord",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "approveOnlinePayment",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "attemptSheetLogin",
+      "domain": "Autres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "calculateTeacherPayroll",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "checkAiQuota",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "checkAndInitSheets",
+      "domain": "École / Paramètres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "checkAndUpdateAccountStatus",
+      "domain": "Autres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "checkCacheHealth",
+      "domain": "École / Paramètres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "checkParentPhoneStatus",
+      "domain": "Portail parent",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "checkStudentBulletinDownloadAllowed",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "classifyAiIntent",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "cleanupSettingsDuplicates",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "clearAllSchoolCaches",
+      "domain": "École / Paramètres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "clearMeigensConfiguration",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "clockInStaff",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "confirmTeacherAlertStatus",
+      "domain": "Audit / Sécurité",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "convertHomeworkToExam",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "createSaaSBackup",
+      "domain": "École / Paramètres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "createSubject",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "deleteAnnouncement",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "deleteExam",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "deleteHomework",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "deleteMedia",
+      "domain": "Médias / Documents",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "deleteStaffAssignment",
+      "domain": "Emploi du temps / Affectations",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "deleteSubject",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "diagnoseSyncIssue",
+      "domain": "Audit / Sécurité",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "dropStudent",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "editPayment",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "enrollStudent",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "ensureAiConfigurationLibrarySheets",
+      "domain": "IA",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "ensureSchoolIdsSheet",
+      "domain": "École / Paramètres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "forceInitAiMasterSheets",
+      "domain": "IA",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "forcePasswordUpdate",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "generateFullStudentReport",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "generateReportDownloadUrl",
+      "domain": "Rapports / Analytics",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "generateStudentAiAppreciation",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAcademicYearRolloverStatus",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getActiveEnrollment",
+      "domain": "Élèves",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAdminMessagesInbox",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAiChatConversation",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAiChatConversationList",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAiChatLibraryStatus",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAiConfigurationAssistanceContext",
+      "domain": "IA",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAiTokenStatus",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAllAdminUsers",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAllStudents",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAnnouncementsForStudent",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAnnouncementsList",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAttendance",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAttendanceByDate",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAttendanceStats",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAuditDiagnostics",
+      "domain": "Audit / Sécurité",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAuditLogs",
+      "domain": "Audit / Sécurité",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAvailableAcademicYears",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getAvailableExams",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getClassComparisonData",
+      "domain": "Autres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getComplexReportData",
+      "domain": "Rapports / Analytics",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getDashboardLiveStats",
+      "domain": "Rapports / Analytics",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getDirectAiKey",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getDownloadPageData",
+      "domain": "Autres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getEnrollmentsByClass",
+      "domain": "Élèves",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getExam",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getExamSubmission",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getExistingGrade",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getGlobalAuditDashboard",
+      "domain": "Audit / Sécurité",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getGrades",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getHomeworkGrades",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getImmersiveData",
+      "domain": "Rapports / Analytics",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getIncidentsForStudent",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getIncidentsList",
+      "domain": "Autres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getInternalNotes",
+      "domain": "Autres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getKioskWatchCodes",
+      "domain": "Kiosque",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getMaternalCurriculumChecks",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getMyAdminMessages",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getMyOnlinePaymentRequests",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getMySchoolId",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getNotifications",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getParentAnnouncements",
+      "domain": "Portail parent",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getParentChildAttendance",
+      "domain": "Présences",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getParentChildIncidents",
+      "domain": "Portail parent",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getParentChildren",
+      "domain": "Portail parent",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getParentPendingRequests",
+      "domain": "Portail parent",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getPayments",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getPayrollHistory",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getPendingOnlinePayments",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getPromotionDecision",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getPromotionOverview",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getQuizQuestions",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getSaaSSettings",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getSchoolIds",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getSchoolIdsRecords",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getSettings",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getSettingsHealth",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStaffAssignments",
+      "domain": "Emploi du temps / Affectations",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStaffAttendance",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStaffList",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStaffManagementData",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudent",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentAiAppreciation",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentAttendance",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentAttendanceStats",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentBulletinData",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentClassRank",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentExamResult",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentFieldsConfig",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentFinanceProfile",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentFinanceSummary",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentHistory",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentHomeworkBulletin",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentIncidents",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentInternalNotes",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentPayments",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getStudentScores",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getSubjectsByLevel",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getSystemAlerts",
+      "domain": "Audit / Sécurité",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getTimetableData",
+      "domain": "Emploi du temps / Affectations",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getUnifiedDirectory",
+      "domain": "Autres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "getUniversalAnalytics",
+      "domain": "Rapports / Analytics",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getUserAiApiKeyStatus",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "getViewerInfo",
+      "domain": "Autres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "gradeExamSubmission",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "gradeHomework",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "grantBackupServiceAccess",
+      "domain": "Utilisateurs / Administration",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "handleTemplateUpload",
+      "domain": "Présences",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "initAiConfigurationLibrary",
+      "domain": "IA",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "initAiMasterSheets",
+      "domain": "IA",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "initSchoolIdsSheet",
+      "domain": "École / Paramètres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "initSheets",
+      "domain": "École / Paramètres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "initializeSheetHeaders",
+      "domain": "École / Paramètres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "listExamSubmissions",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "listExams",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "listHomework",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "listMedia",
+      "domain": "Médias / Documents",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "listSchoolIds",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "listStudentExams",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "listStudentHomework",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "logAudit",
+      "domain": "Audit / Sécurité",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "logReportGenerated",
+      "domain": "Rapports / Analytics",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "loginWithIdAndPin",
+      "domain": "Élèves",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "lookupStudentGlobal",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "markAllNotificationsRead",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "markNotificationRead",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "notifyLateStaff",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "parentPortalLogin",
+      "domain": "Portail parent",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "parentPortalLoginV2",
+      "domain": "Portail parent",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "ping",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "processPayrollBatch",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "processPromotionDecision",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "processUserMessage",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "publishAnnouncement",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "publishExam",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "purgeExpiredTokens",
+      "domain": "Autres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "reEnrollStudent",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "recordAiDirectTokenUsage",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "recordAttendance",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "recordBulkAttendance",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "recordNewPayment",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "recordStudentAttendance",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "recordTransportAttendance",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "registerBulletinIssue",
+      "domain": "Élèves",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "rejectOnlinePayment",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "removeUserAccess",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "replyToAdminMessage",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "reportSecurityIncident",
+      "domain": "Audit / Sécurité",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "resetAcademicYearRollover",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "resetAiChatConversation",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "resetAiTokenLog",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "resetAiTokenSession",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "resetStudentPin",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "resetUserPassword",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "resolveParentRequest",
+      "domain": "Portail parent",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "rolloverAcademicYear",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "runAuditMigration",
+      "domain": "Audit / Sécurité",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "runGlobalBackupTask",
+      "domain": "École / Paramètres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveAiApiKeys",
+      "domain": "IA",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveChunkedCurriculum",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveDocumentSignature",
+      "domain": "Médias / Documents",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveExam",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveExamProgress",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveHomework",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveKioskWatchCodes",
+      "domain": "Kiosque",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveManualExamGrade",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveMaternalCurriculumCheck",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveMaternalMentions",
+      "domain": "Autres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveMedia",
+      "domain": "Médias / Documents",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveMedicalRecord",
+      "domain": "Autres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveSchoolIdRecord",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveStaffAccess",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveStaffAssignment",
+      "domain": "Emploi du temps / Affectations",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveStudentAiAppreciation",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveTeacherPaymentMode",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveTimetableData",
+      "domain": "Emploi du temps / Affectations",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "saveUserTheme",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "searchStudents",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "sendEmailVerification",
+      "domain": "IA",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "sendInternalMessage",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "sendMessageToAdmin",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "sendSMSBulk",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "sendStudentReportEmail",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "sendWhatsApp",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "setParentReplyPermission",
+      "domain": "Portail parent",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "setUserAiApiKey",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "setupInitialPin",
+      "domain": "Élèves",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "setupParentPin",
+      "domain": "Élèves",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "setupStaffPin",
+      "domain": "Élèves",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "startStudentExam",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "studentPortalLogin",
+      "domain": "Élèves",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "submitOnlinePayment",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "submitParentRegistrationRequest",
+      "domain": "Portail parent",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "submitStudentExam",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "testSMSConnection",
+      "domain": "Communication",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "toggleGodMode",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "toggleUserActiveState",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "translateMeigensText",
+      "domain": "Présences",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "updateExamSettings",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "updateGradeSubjects",
+      "domain": "Notes / Examens",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "updateLocalSettings",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "updateMyProfilePhoto",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "updateSaaSSettings",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "updateSchoolIdRecord",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "updateStudent",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "updateStudentHistory",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "updateStudentPortalUrl",
+      "domain": "Élèves",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "updateUserRoleAndPerms",
+      "domain": "Utilisateurs / Administration",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "uploadLogoToDriveSecure",
+      "domain": "Médias / Documents",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "uploadMediaFile",
+      "domain": "Médias / Documents",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "uploadPwaScreenshotToDriveSecure",
+      "domain": "Médias / Documents",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "upsertSchoolIdRecord",
+      "domain": "École / Paramètres",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "verifyBulletin",
+      "domain": "Élèves",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "verifyEmailOTP",
+      "domain": "IA",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "verifyPaymentByClientRequestId",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "verifyStudentByLast4",
+      "domain": "Élèves",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "verifyUserAiApiKey",
+      "domain": "IA",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "voidPayment",
+      "domain": "Finance / Paiements",
+      "status": "PORTÉ",
+      "workerExport": true,
+      "codeGsContract": true
+    },
+    {
+      "action": "warmSchoolCaches",
+      "domain": "École / Paramètres",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "writeAuditLog",
+      "domain": "Audit / Sécurité",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    },
+    {
+      "action": "writeAuditLog_",
+      "domain": "Audit / Sécurité",
+      "status": "À PORTER",
+      "workerExport": false,
+      "codeGsContract": true
+    }
+  ]
+}

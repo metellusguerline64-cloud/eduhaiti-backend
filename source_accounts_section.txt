@@ -1,0 +1,416 @@
+  if (!raw) return null;
+  if (Object.prototype.toString.call(raw) === '[object Date]' && !isNaN(raw.getTime())) return raw;
+
+  const s = String(raw).trim();
+  if (!s) return null;
+
+  const direct = new Date(s);
+  if (!isNaN(direct.getTime())) return direct;
+
+  const m = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!m) return null;
+
+  const p1 = parseInt(m[1], 10);
+  const p2 = parseInt(m[2], 10);
+  let year = parseInt(m[3], 10);
+  const hh = parseInt(m[4] || '0', 10);
+  const mm = parseInt(m[5] || '0', 10);
+  const ss = parseInt(m[6] || '0', 10);
+  if (year < 100) year += 2000;
+
+  const month = p1 > 12 ? p2 : p1;
+  const day = p1 > 12 ? p1 : p2;
+  const parsed = new Date(year, month - 1, day, hh, mm, ss);
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeSubscriptionPlan_(plan) {
+  return String(plan || '').trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+}
+
+function isLifetimePlan_(plan) {
+  const p = normalizeSubscriptionPlan_(plan);
+  return !!p && (p.includes('VIE') || p.includes('LIFETIME') || p.includes('A VIE'));
+}
+
+function evaluateAccountStatusFromRegisterRow_(row, idx, nowMs) {
+  const now = nowMs || Date.now();
+  const planRaw = idx.iPlan !== -1 ? row[idx.iPlan] : '';
+  const plan = String(planRaw || '').trim();
+  const isLifetime = isLifetimePlan_(plan);
+  const expirationDate = idx.iExp !== -1 ? parseRegisterDate_(row[idx.iExp]) : null;
+  const currentActive = !['FALSE', 'NON', 'NO', '0'].includes(String(row[idx.iActive] || 'TRUE').trim().toUpperCase());
+
+  let shouldBeActive = currentActive;
+  let reason = 'UNCHANGED';
+
+  if (isLifetime) {
+    shouldBeActive = true;
+    reason = 'LIFETIME_PLAN';
+  } else if (expirationDate) {
+    shouldBeActive = expirationDate.getTime() >= now;
+    reason = shouldBeActive ? 'VALID_UNTIL_DATE' : 'EXPIRED';
+  } else {
+    reason = currentActive ? 'NO_EXPIRY_ACTIVE' : 'NO_EXPIRY_INACTIVE';
+  }
+
+  return {
+    shouldBeActive: shouldBeActive,
+    currentActive: currentActive,
+    reason: reason,
+    plan: plan,
+    expirationDate: expirationDate
+  };
+}
+
+function checkAndUpdateAccountStatus_(payload, auth) {
+  try {
+    const viewer = getViewerInfo_(auth);
+    if (!viewer || !viewer.success) return { success: false, error: 'Session invalide.' };
+
+    const data = payload || {};
+    const runAll = data.all === true || String(data.scope || '').toLowerCase() === 'all';
+    if (runAll && !viewer.isMaster && !viewer.isGodMode) {
+      return { success: false, error: 'Seul un administrateur master peut synchroniser tous les comptes.' };
+    }
+
+    const activeSsId = SpreadsheetApp.getActiveSpreadsheet().getId();
+    const targetSsId = String(data.spreadsheetId || activeSsId).trim();
+    const master = SpreadsheetApp.openById(MASTER_AUTH_ID);
+    const reg = master.getSheetByName('Register');
+    if (!reg) return { success: false, error: 'Registre Master introuvable.' };
+
+    const matrix = reg.getDataRange().getValues();
+    if (!matrix || matrix.length < 2) return { success: false, error: 'Registre Master vide.' };
+
+    const h = matrix[0].map(x => String(x).trim().toUpperCase());
+    const iSsId = h.indexOf('USER_SPREADSHEET_ID');
+    const iActive = h.indexOf('IS_ACTIVE');
+    const iPlan = h.indexOf('SUBSCRIPTION_PLAN');
+    const iExp = h.indexOf('EXPIRATION_DATE');
+    const iId = h.indexOf('ID');
+    const iBiz = h.indexOf('BUSINESS_NAME');
+    if (iSsId === -1 || iActive === -1) {
+      return { success: false, error: 'Colonnes USER_SPREADSHEET_ID / IS_ACTIVE manquantes.' };
+    }
+
+    const idx = { iActive: iActive, iPlan: iPlan, iExp: iExp };
+    const now = Date.now();
+    const updates = [];
+    const touchedSpreadsheetIds = {};
+
+    for (let r = 1; r < matrix.length; r++) {
+      const row = matrix[r];
+      const ssId = String(row[iSsId] || '').trim();
+      if (!ssId) continue;
+      if (!runAll && ssId !== targetSsId) continue;
+
+      const evalResult = evaluateAccountStatusFromRegisterRow_(row, idx, now);
+      const newActiveCell = evalResult.shouldBeActive ? 'TRUE' : 'FALSE';
+      const oldActiveCell = String(row[iActive] || '').trim().toUpperCase();
+
+      if (oldActiveCell !== newActiveCell) {
+        reg.getRange(r + 1, iActive + 1).setValue(newActiveCell);
+      }
+
+      touchedSpreadsheetIds[ssId] = true;
+      updates.push({
+        row: r + 1,
+        id: iId !== -1 ? String(row[iId] || '').trim() : '',
+        businessName: iBiz !== -1 ? String(row[iBiz] || '').trim() : '',
+        spreadsheetId: ssId,
+        previousActive: oldActiveCell || 'TRUE',
+        nextActive: newActiveCell,
+        changed: oldActiveCell !== newActiveCell,
+        plan: evalResult.plan,
+        expirationDate: evalResult.expirationDate ? evalResult.expirationDate.toISOString() : '',
+        reason: evalResult.reason
+      });
+    }
+
+    if (!updates.length) {
+      return {
+        success: false,
+        error: runAll
+          ? 'Aucune ligne de compte avec USER_SPREADSHEET_ID valide.'
+          : 'Aucun compte trouvé pour ce tableur dans le Registre Master.'
+      };
+    }
+
+    Object.keys(touchedSpreadsheetIds).forEach(ssId => {
+      try { CacheService.getScriptCache().remove('SUB_CHECK_' + ssId); } catch(e) {}
+    });
+
+    writeMasterAuthAuditLog_(
+      'ACCOUNT_STATUS_SYNC',
+      runAll ? 'ALL_ACCOUNTS' : targetSsId,
+      {
+        actor: viewer.email || '',
+        scope: runAll ? 'ALL' : 'SINGLE',
+        totalReviewed: updates.length,
+        changed: updates.filter(x => x.changed).length
+      },
+      'SYSTEM_ALERT',
+      false
+    );
+
+    return {
+      success: true,
+      scope: runAll ? 'ALL' : 'SINGLE',
+      reviewed: updates.length,
+      changed: updates.filter(x => x.changed).length,
+      data: updates
+    };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+function formatSupportDate_(raw) {
+  const d = parseRegisterDate_(raw);
+  if (!d) return 'Non renseignée';
+  const tz = Session.getScriptTimeZone() || 'Etc/GMT';
+  return Utilities.formatDate(d, tz, 'yyyy-MM-dd HH:mm:ss');
+}
+
+function getBlockedPageContext_(ssId, token) {
+  const ctx = {
+    isPrivileged: false,
+    schoolName: '',
+    schoolEmail: '',
+    schoolPhone: '',
+    registeredDate: 'Non renseignée',
+    lastPaymentDate: 'Non renseignée',
+    expirationDate: 'Non renseignée',
+    plan: 'Non renseigné',
+    paymentType: 'Non renseigné',
+    accountStatus: 'INCONNU'
+  };
+
+  const isMeigensEmail_ = (value) => {
+    const v = String(value || '').trim().toLowerCase();
+    return v === 'meigenstech@gmail.com' || v.endsWith('@meigens.tech');
+  };
+  const normalizeDigits_ = (value) => String(value || '').replace(/[^0-9]/g, '');
+
+  try {
+    const tokenStr = normalizeAuthToken_(token);
+    const session = tokenStr ? loadSessionToken_(tokenStr) : null;
+    const sessionEmail = session && session.email ? String(session.email).toLowerCase().trim() : '';
+
+    if (sessionEmail) {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const sh = ss.getSheetByName(USERS_SHEET_NAME) || ss.getSheetByName('Admin_Users');
+      if (sh && sh.getLastRow() > 1) {
+        const rows = sh.getDataRange().getValues();
+        const h = rows[0].map(x => String(x).trim().toLowerCase());
+        const find = (names) => h.findIndex(x => names.some(v => x.replace(/[\s_]/g, '') === v.replace(/[\s_]/g, '')));
+        const iEmail = find(['email']);
+        const iRole = find(['role']);
+        const iPerms = find(['permissionsjson', 'permissions']);
+        const iActive = find(['active', 'actif']);
+
+        if (iEmail !== -1) {
+          const candidates = rows.slice(1).filter(r => String(r[iEmail] || '').toLowerCase().trim() === sessionEmail);
+          const row = candidates.find(r => iActive === -1 || String(r[iActive] || '').toUpperCase() !== 'FALSE') || candidates[0];
+          if (row) {
+            const perms = iPerms !== -1 ? parsePermissionsCell_(row[iPerms]) : {};
+            ctx.isPrivileged = !!(perms && perms.isGodMode);
+          }
+        }
+      }
+    }
+  } catch (e) {}
+
+  // Fallback to the main auth resolver so admins are recognized even when
+  // lightweight session parsing above misses a valid token context.
+  if (!ctx.isPrivileged) {
+    try {
+      const viewer = getViewerInfo_(token);
+      if (viewer && viewer.success) {
+        ctx.isPrivileged = !!(viewer.isMaster || viewer.isGodMode);
+      }
+    } catch (e) {}
+  }
+
+  try {
+    const master = SpreadsheetApp.openById(MASTER_AUTH_ID);
+    const reg = master.getSheetByName('Register');
+    if (!reg || reg.getLastRow() < 2) return ctx;
+
+    const data = reg.getDataRange().getValues();
+    const h = data[0].map(x => String(x).trim().toUpperCase());
+    const idx = {
+      ssId: h.indexOf('USER_SPREADSHEET_ID'),
+      businessName: h.indexOf('BUSINESS_NAME'),
+      contactName: h.indexOf('NAME'),
+      email: h.indexOf('EMAIL'),
+      phone: h.indexOf('PHONE'),
+      txnPhone: h.indexOf('TRANSACTION_PHONE'),
+      created: h.indexOf('DATE_CREATED'),
+      plan: h.indexOf('SUBSCRIPTION_PLAN'),
+      paymentType: h.indexOf('PAYMENT_TYPE'),
+      exp: h.indexOf('EXPIRATION_DATE'),
+      active: h.indexOf('IS_ACTIVE')
+    };
+
+    const iLastPayment = h.findIndex(x => ['LAST_PAYMENT_DATE', 'LAST_PAYMENT_AT', 'PAYMENT_DATE', 'DATE_DERNIER_PAIEMENT'].includes(x));
+    if (idx.ssId === -1) return ctx;
+
+    const targetSsId = normalizeSpreadsheetId_(ssId);
+    const matches = data.filter((r, i) => i > 0 && normalizeSpreadsheetId_(r[idx.ssId]) === targetSsId);
+    if (!matches.length) return ctx;
+    const nowMs = Date.now();
+    const isInactive = (value) => {
+      const v = String(value || '').trim().toUpperCase();
+      return v === 'FALSE' || v === 'NON' || v === 'NO' || v === '0';
+    };
+    const isRowCurrent = (r) => {
+      if (idx.active !== -1 && isInactive(r[idx.active])) return false;
+      const planVal = idx.plan !== -1 ? String(r[idx.plan] || '').trim() : '';
+      if (isLifetimePlan_(planVal)) return true;
+      const expDate = idx.exp !== -1 ? parseRegisterDate_(r[idx.exp]) : null;
+      if (!expDate) return true;
+      return expDate.getTime() >= nowMs;
+    };
+    const row = matches.slice().reverse().find(isRowCurrent) || matches[matches.length - 1];
+
+    ctx.schoolName = idx.businessName !== -1 ? String(row[idx.businessName] || '').trim() : '';
+    if (!ctx.schoolName && idx.contactName !== -1) ctx.schoolName = String(row[idx.contactName] || '').trim();
+
+    ctx.schoolEmail = idx.email !== -1 ? String(row[idx.email] || '').trim() : '';
+    ctx.schoolPhone = idx.phone !== -1 ? String(row[idx.phone] || '').trim() : '';
+    if (!ctx.schoolPhone && idx.txnPhone !== -1) ctx.schoolPhone = String(row[idx.txnPhone] || '').trim();
+
+    ctx.registeredDate = idx.created !== -1 ? formatSupportDate_(row[idx.created]) : ctx.registeredDate;
+    ctx.lastPaymentDate = iLastPayment !== -1 ? formatSupportDate_(row[iLastPayment]) : 'Non renseignée';
+    ctx.expirationDate = idx.exp !== -1 ? formatSupportDate_(row[idx.exp]) : ctx.expirationDate;
+    ctx.plan = idx.plan !== -1 ? (String(row[idx.plan] || '').trim() || 'Non renseigné') : ctx.plan;
+    ctx.paymentType = idx.paymentType !== -1 ? (String(row[idx.paymentType] || '').trim() || 'Non renseigné') : ctx.paymentType;
+    ctx.accountStatus = idx.active !== -1 && ['FALSE', 'NON', 'NO', '0'].includes(String(row[idx.active] || '').trim().toUpperCase()) ? 'SUSPENDU' : 'ACTIF';
+  } catch (e) {}
+
+  // Prefer local school contact settings for non-privileged users.
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const shSettings = ss.getSheetByName('Settings');
+    if (shSettings && shSettings.getLastRow() > 1) {
+      const rows = shSettings.getDataRange().getValues();
+      const kv = {};
+      for (let i = 1; i < rows.length; i++) {
+        const key = String(rows[i][0] || '').trim().toUpperCase();
+        if (!key) continue;
+        kv[key] = rows[i][1];
+      }
+
+      const localEmail = String(
+        kv.CONTACTEMAIL || kv.SCHOOLEMAIL || kv.ADMINEMAIL || kv.SUPPORTEMAIL || ''
+      ).trim();
+      const localPhone = String(
+        kv.CONTACTPHONE || kv.SCHOOLPHONE || kv.ADMINPHONE || kv.PHONE || ''
+      ).trim();
+
+      const shouldFallbackEmail = !ctx.schoolEmail || isMeigensEmail_(ctx.schoolEmail);
+      if (shouldFallbackEmail && localEmail && !isMeigensEmail_(localEmail)) {
+        ctx.schoolEmail = localEmail;
+      }
+
+      const shouldFallbackPhone = !ctx.schoolPhone;
+      if (shouldFallbackPhone && localPhone) {
+        ctx.schoolPhone = localPhone;
+      }
+    }
+  } catch (e) {}
+
+  // Final fallback: use Users sheet admin email if school email is empty or still Meigens internal.
+  if (!ctx.schoolEmail || isMeigensEmail_(ctx.schoolEmail)) {
+    try {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      const shUsers = ss.getSheetByName(USERS_SHEET_NAME) || ss.getSheetByName('Admin_Users');
+      if (shUsers && shUsers.getLastRow() > 1) {
+        const rows = shUsers.getDataRange().getValues();
+        const h = rows[0].map(x => String(x).trim().toLowerCase());
+        const find = (names) => h.findIndex(x => names.some(v => x.replace(/[\s_]/g, '') === v.replace(/[\s_]/g, '')));
+        const iEmail = find(['email']);
+        const iRole = find(['role']);
+        const iActive = find(['active', 'actif']);
+        if (iEmail !== -1) {
+          const isUsable = (r) => {
+            const email = String(r[iEmail] || '').trim();
+            const activeOk = iActive === -1 || String(r[iActive] || '').toUpperCase() !== 'FALSE';
+            return email && activeOk && !isMeigensEmail_(email);
+          };
+          let adminRow = null;
+          if (iRole !== -1) {
+            adminRow = rows.slice(1).find(r => String(r[iRole] || '').toUpperCase() === 'ADMIN' && isUsable(r)) || null;
+          }
+          if (!adminRow) adminRow = rows.slice(1).find(r => isUsable(r)) || null;
+          if (adminRow) ctx.schoolEmail = String(adminRow[iEmail] || '').trim();
+        }
+      }
+    } catch (e) {}
+  }
+
+  const meigensDigits = normalizeDigits_(ERROR_CONFIG.contactPhone || '+50946256973');
+  const schoolDigits = normalizeDigits_(ctx.schoolPhone);
+  if (!ctx.isPrivileged && schoolDigits && (schoolDigits === meigensDigits || schoolDigits === meigensDigits.replace(/^509/, ''))) {
+    ctx.schoolPhone = '';
+  }
+
+  return ctx;
+}
+
+function checkSubscriptionStatus_(options) {
+  const opts = options || {};
+  const forceFresh = !!opts.forceFresh;
+  const requestedOrgId = String(opts.orgId || '').trim().toLowerCase();
+  const ss      = SpreadsheetApp.getActiveSpreadsheet();
+  const ssId    = ss.getId();
+  const requestedSsId = normalizeSpreadsheetId_(opts.spreadsheetId || ssId);
+  // Cache the subscription check for 15 minutes to avoid
+  // opening the master spreadsheet on every write operation.
+  const cacheScope = requestedOrgId ? ('ORG_' + requestedOrgId) : requestedSsId;
+  const cKey   = 'SUB_CHECK_' + cacheScope;
+  const cached = forceFresh ? null : _safeCacheGetData_(cKey);
+  if (cached && cached.success) return cached;
+  const master  = SpreadsheetApp.openById(MASTER_AUTH_ID);
+  const reg     = master.getSheetByName('Register');
+  if (!reg) throw new Error('Registre Master introuvable.');
+  const data    = reg.getDataRange().getValues();
+  const h       = data[0].map(x => String(x).trim().toUpperCase());
+  const iSsId   = h.indexOf('USER_SPREADSHEET_ID');
+  const iActive = h.indexOf('IS_ACTIVE');
+  const iName   = h.indexOf('BUSINESS_NAME');
+  const iPlan   = h.indexOf('SUBSCRIPTION_PLAN');
+  const iExp    = h.indexOf('EXPIRATION_DATE');
+  const iMode   = h.indexOf('ID_GENERATION_MODE');
+  const iOrgId  = h.indexOf('ID');
+  const iStaffUrl = h.indexOf('STAFF_APP_URL');
+  const iStudentUrl = h.indexOf('STUDENT_PORTAL_URL');
+  if (iSsId === -1) throw new Error('Colonne USER_SPREADSHEET_ID manquante.');
+
+  let matchedRows = data.filter((r, idx) => {
+    if (idx === 0) return false;
+    const rowSsId = normalizeSpreadsheetId_(r[iSsId]);
+    const rowOrgId = iOrgId !== -1 ? String(r[iOrgId] || '').trim().toLowerCase() : '';
+    const ssMatch = rowSsId && rowSsId === requestedSsId;
+    const orgMatch = requestedOrgId && rowOrgId && rowOrgId === requestedOrgId;
+    return !!(ssMatch || orgMatch);
+  });
+
+  // Fallback: when request has no org/spreadsheet identifier, try resolving tenant by current script id
+  // from STAFF_APP_URL / STUDENT_PORTAL_URL in Register.
+  if (!matchedRows.length && !requestedOrgId) {
+    let currentScriptId = '';
+    try { currentScriptId = String(ScriptApp.getScriptId() || '').trim(); } catch (_) {}
+    if (currentScriptId) {
+      matchedRows = data.filter((r, idx) => {
+        if (idx === 0) return false;
+        const staffUrl = iStaffUrl !== -1 ? String(r[iStaffUrl] || '') : '';
+        const studentUrl = iStudentUrl !== -1 ? String(r[iStudentUrl] || '') : '';
+        return staffUrl.indexOf(currentScriptId) !== -1 || studentUrl.indexOf(currentScriptId) !== -1;
+      });
+    }
+  }
+
+  if (!matchedRows.length) throw new Error('Ce systeme n\'est pas certifie par Meigens Tech.');

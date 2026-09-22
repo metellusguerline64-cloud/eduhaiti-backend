@@ -1,0 +1,85 @@
+#!/usr/bin/env node
+import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+const PORT = Number(process.env.EDU_EDGE_PORT || 8787);
+const HOST = process.env.EDU_EDGE_HOST || '0.0.0.0';
+const SITE_ID = String(process.env.EDU_EDGE_SITE_ID || 'SITE-LOCAL');
+const EDGE_ID = String(process.env.EDU_EDGE_ID || `EDGE-${SITE_ID}`);
+const CLOUD_BASE_URL = String(process.env.EDU_EDGE_CLOUD_URL || '').replace(/\/+$/, '');
+const DATA_DIR = path.resolve(process.env.EDU_EDGE_DATA_DIR || './.eduhaiti-edge');
+const EVENTS_FILE = path.join(DATA_DIR, 'events.jsonl');
+const MAX_BODY = 8 * 1024 * 1024;
+
+await fs.mkdir(DATA_DIR, { recursive: true });
+
+function cors(req, res) {
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Eduhaiti-Edge-Id, X-Eduhaiti-Site-Id');
+}
+function json(res, body, status = 200) {
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.end(JSON.stringify(body));
+}
+async function readBody(req) {
+  let total = 0; const chunks = [];
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > MAX_BODY) throw new Error('Corps de requête trop volumineux.');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+async function logEvent(kind, data) {
+  const row = { ts: new Date().toISOString(), kind, siteId: SITE_ID, edgeId: EDGE_ID, ...data };
+  await fs.appendFile(EVENTS_FILE, JSON.stringify(row) + '\n', 'utf8').catch(() => {});
+}
+async function proxy(req, res, body) {
+  if (!CLOUD_BASE_URL) return json(res, { success:false, error:'EDU_EDGE_CLOUD_URL non configurée.' }, 503);
+  const target = new URL(req.url, CLOUD_BASE_URL);
+  const headers = new Headers();
+  for (const [k,v] of Object.entries(req.headers)) {
+    if (!v || k.toLowerCase() === 'host' || k.toLowerCase() === 'content-length') continue;
+    headers.set(k, Array.isArray(v) ? v.join(',') : v);
+  }
+  headers.set('X-Eduhaiti-Edge-Id', EDGE_ID);
+  headers.set('X-Eduhaiti-Site-Id', SITE_ID);
+  const r = await fetch(target, { method:req.method, headers, body: body?.length ? body : undefined });
+  const buf = Buffer.from(await r.arrayBuffer());
+  res.statusCode = r.status;
+  r.headers.forEach((v,k) => { if (!['transfer-encoding','content-encoding','content-length'].includes(k.toLowerCase())) res.setHeader(k,v); });
+  res.end(buf);
+}
+
+const server = http.createServer(async (req,res) => {
+  cors(req,res);
+  if (req.method === 'OPTIONS') return res.end();
+  try {
+    const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    if (u.pathname === '/edge/health') {
+      return json(res, { success:true, mode:'edge-first', siteId:SITE_ID, edgeId:EDGE_ID, cloudConfigured:!!CLOUD_BASE_URL, now:new Date().toISOString() });
+    }
+    if (u.pathname === '/edge/config') {
+      return json(res, { success:true, siteId:SITE_ID, edgeId:EDGE_ID, mode:'edge-first', cloudConfigured:!!CLOUD_BASE_URL });
+    }
+    const body = (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') ? await readBody(req) : null;
+    if (u.pathname.startsWith('/api')) {
+      await logEvent('proxy', { method:req.method, path:u.pathname, action:u.searchParams.get('action') || null });
+      return proxy(req,res,body);
+    }
+    return json(res,{success:false,error:'Route Edge inconnue.'},404);
+  } catch (e) {
+    await logEvent('error',{error:e?.message || String(e)});
+    return json(res,{success:false,error:e?.message || String(e)},500);
+  }
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`EduHaïti Edge ${EDGE_ID} — site ${SITE_ID} — http://${HOST}:${PORT}`);
+  if (!CLOUD_BASE_URL) console.warn('EDU_EDGE_CLOUD_URL n\'est pas configurée : le relais Cloud est désactivé.');
+});

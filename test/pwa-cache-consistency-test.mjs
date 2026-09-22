@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const store=fs.readFileSync(new URL('../frontend-dist/offline-domain.js', import.meta.url),'utf8');
+const integration=fs.readFileSync(new URL('../frontend-dist/offline-domain-integration.js', import.meta.url),'utf8');
+assert.match(store,/async function reconcileAppliedEntry\(entry, outcome\)/);
+assert.match(store,/version: Number\(outcome && outcome\.version/);
+assert.match(store,/delete row\._offlinePending/);
+assert.match(integration,/reconcileAppliedEntry\(entry, outcome\)/);
+assert.match(integration,/if \(WRITE_ACTIONS\.has\(a\)\)/);
+console.log('PWA cache consistency test: PASS');

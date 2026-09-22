@@ -1,0 +1,17 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const root=new URL('../frontend-dist/',import.meta.url);
+const portable=fs.readFileSync(new URL('offline-portable.js',root),'utf8');
+const integration=fs.readFileSync(new URL('offline-domain-integration.js',root),'utf8');
+const html=fs.readFileSync(new URL('index.html',root),'utf8');
+assert.match(portable,/showDirectoryPicker/);
+assert.match(portable,/eduhaiti-offline\.json/);
+assert.match(portable,/eduhaiti-portable-folder/);
+assert.match(portable,/media-index\.json/);
+assert.match(portable,/separate-files/);
+assert.match(portable,/getFileHandle/);
+assert.match(portable,/mergeBundle/);
+assert.match(portable,/offlineLease/);
+assert.match(integration,/offlineAllowed/);
+assert.match(html,/offline-portable\.js/);
+console.log('PWA portable offline workspace test: PASS');

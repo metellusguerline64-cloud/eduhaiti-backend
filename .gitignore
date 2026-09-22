@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+*.sqlite
+*.sqlite3
+.env
+.env.local
+frontend-dist/

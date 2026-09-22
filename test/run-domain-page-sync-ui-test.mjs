@@ -1,0 +1,11 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const html=fs.readFileSync(new URL('../frontend-dist/index.html',import.meta.url),'utf8');
+const js=fs.readFileSync(new URL('../frontend-dist/domain-page-sync-ui.js',import.meta.url),'utf8');
+assert.match(html,/domain-page-sync-ui\.js/);
+for (const view of ['students','grades','attendance','finance','timetable','teacher-affectation']) assert.match(js,new RegExp(view.replace('-','\\-')));
+assert.match(js,/EDU_OFFLINE_SYNC_NOW/);
+assert.match(js,/getDomainHealth/);
+assert.match(js,/eduhaiti:sync-state/);
+assert.match(js,/IndexedDB|offline/i);
+console.log('PWA-0059 domain page sync UI test: PASS');

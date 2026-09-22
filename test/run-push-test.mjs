@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { makeD1 } from './d1shim.mjs';
+import { storeSessionToken } from '../src/lib/session.js';
+import { getPushConfig, registerPushSubscription, unregisterPushSubscription, listPushNotifications } from '../src/actions/push.js';
+
+const db = makeD1(':memory:');
+db._raw.exec(fs.readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
+db._raw.exec(fs.readFileSync(new URL('../migrations/0022_web_push.sql', import.meta.url), 'utf8'));
+db._raw.prepare(`INSERT INTO settings(key,value) VALUES('ORG_ID','ORG1')`).run();
+db._raw.prepare(`INSERT INTO users(id,user_id,email,name,password_hash,permissions_json,active) VALUES(?,?,?,?,?,?,1)`).run('u1','P1','parent@example.com','Parent','x','{}');
+await storeSessionToken(db, 'push-token', { userId:'u1', email:'parent@example.com', role:'PARENT' });
+const env = { DB:db, ORG_ID:'ORG1', VAPID_PUBLIC_KEY:'public-key' };
+const auth = { token:'push-token' };
+const subscription = { endpoint:'https://push.example/sub/1', keys:{ p256dh:'p256dh', auth:'auth' } };
+const config = await getPushConfig({}, auth, env);
+assert.equal(config.success, true);
+const registered = await registerPushSubscription({ subscription, ownerType:'parent', ownerId:'P1' }, auth, env);
+assert.equal(registered.success, true);
+const listed = await db.prepare(`SELECT owner_id,active FROM push_subscriptions WHERE org_id='ORG1'`).all();
+assert.equal(listed.results.length, 1);
+assert.equal(listed.results[0].owner_id, 'P1');
+const notifications = await listPushNotifications({ ownerType:'parent', ownerId:'P1' }, auth, env);
+assert.equal(notifications.success, true);
+await db.prepare(`INSERT INTO push_notifications(id,org_id,owner_type,owner_id,title,body,data_json,status) VALUES(?,?,?,?,?,?,?,'QUEUED')`)
+	.bind('push-1','ORG1','parent','*','Absence','Votre enfant est absent',JSON.stringify({ channel:'PUSH', audience:'PARENTS' })).run();
+const broadcast = await listPushNotifications({ ownerType:'parent', ownerId:'P1' }, auth, env);
+assert.equal(broadcast.items.length, 1);
+assert.equal(broadcast.items[0].data.channel, 'PUSH');
+const removed = await unregisterPushSubscription({ endpoint:subscription.endpoint }, auth, env);
+assert.equal(removed.success, true);
+const inactive = await db.prepare(`SELECT active FROM push_subscriptions WHERE endpoint=?`).bind(subscription.endpoint).first();
+assert.equal(Number(inactive.active), 0);
+console.log('web push subscription flow passed');

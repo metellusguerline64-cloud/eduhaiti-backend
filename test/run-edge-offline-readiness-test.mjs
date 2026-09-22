@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+const edge=fs.readFileSync(new URL('../edge/eduhaiti-edge.mjs',import.meta.url),'utf8');
+const front=fs.readFileSync(new URL('../frontend-dist/offline-domain-integration.js',import.meta.url),'utf8');
+const portable=fs.readFileSync(new URL('../frontend-dist/offline-portable.js',import.meta.url),'utf8');
+const sw=fs.readFileSync(new URL('../frontend-dist/sw.js',import.meta.url),'utf8');
+assert.ok(edge.includes("'getViewerInfo'"),'getViewerInfo local action missing');
+assert.ok(edge.includes("const deviceCheck=await requireDevice(req,identity,null,!REQUIRE_REGISTERED_DEVICE);"),'local API device gate missing');
+assert.ok(edge.includes('identityExpiresAt'),'offline identity expiry missing');
+assert.ok(edge.includes('EDU_EDGE_OFFLINE_SESSION_TTL_MS'),'offline session TTL config missing');
+assert.ok(front.includes('readDomainResponse'),'IndexedDB domain read missing');
+assert.ok(front.includes('window.EDU_EDGE_FIRST'),'Edge fallback missing');
+assert.ok(portable.includes('navigator.storage.persist'),'persistent storage request missing');
+assert.ok(sw.includes('syncPush'),'service worker syncPush path missing');
+assert.ok(sw.includes('mediaOutbox'),'service worker media outbox path missing');
+console.log('edge offline production readiness static checks: PASS');

@@ -1,0 +1,536 @@
+#!/usr/bin/env node
+/**
+ * EduHaïti Edge v2 — site-local persistent relay.
+ *
+ * Cloud = global authority.
+ * Edge = local site relay + durable queue for idempotent syncPush batches.
+ * Terminal = IndexedDB/offline-first authority for its own work.
+ *
+ * Only typed syncPush is queued when Cloud is unreachable. Other API calls
+ * fail normally so we never replay a non-idempotent legacy action blindly.
+ */
+import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+const PORT = Number(process.env.EDU_EDGE_PORT || 8787);
+const HOST = process.env.EDU_EDGE_HOST || '0.0.0.0';
+const SITE_ID = String(process.env.EDU_EDGE_SITE_ID || 'SITE-LOCAL');
+const EDGE_ID = String(process.env.EDU_EDGE_ID || `EDGE-${SITE_ID}`);
+const CLOUD_BASE_URL = String(process.env.EDU_EDGE_CLOUD_URL || '').replace(/\/+$/, '');
+const DATA_DIR = path.resolve(process.env.EDU_EDGE_DATA_DIR || './.eduhaiti-edge');
+const EVENTS_FILE = path.join(DATA_DIR, 'events.jsonl');
+const QUEUE_FILE = path.join(DATA_DIR, 'sync-queue.json');
+const STORE_FILE = path.join(DATA_DIR, 'site-store.json');
+const STORE_VERSION = 1;
+const MAX_BODY = 16 * 1024 * 1024;
+const RETRY_MS = Math.max(Number(process.env.EDU_EDGE_RETRY_MS || 15000), 5000);
+const MAX_RETRIES = Math.max(Number(process.env.EDU_EDGE_MAX_RETRIES || 1000), 1);
+const OFFLINE_SESSION_TTL_MS = Math.max(Number(process.env.EDU_EDGE_OFFLINE_SESSION_TTL_MS || 86400000), 60000);
+const IDENTITY_FILE = path.join(DATA_DIR, 'identity-cache.json');
+
+await fs.mkdir(DATA_DIR, { recursive: true });
+
+let queue = await loadQueue();
+let store = await loadStore();
+let flushRunning = false;
+let storePersistChain = Promise.resolve();
+let cloudReachable = false;
+let persistChain = Promise.resolve();
+let identityCache = await loadIdentityCache();
+let identityPersistChain = Promise.resolve();
+
+
+async function loadIdentityCache() {
+  try {
+    const raw = await fs.readFile(IDENTITY_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && parsed.version === 1 && parsed.entries && typeof parsed.entries === 'object'
+      ? parsed
+      : { version:1, siteId:SITE_ID, edgeId:EDGE_ID, entries:{} };
+  } catch (_) { return { version:1, siteId:SITE_ID, edgeId:EDGE_ID, entries:{} }; }
+}
+
+function persistIdentityCache() {
+  const snapshot = JSON.stringify(identityCache, null, 2);
+  identityPersistChain = identityPersistChain.then(() => fs.writeFile(IDENTITY_FILE, snapshot, 'utf8')).catch(() => {});
+  return identityPersistChain;
+}
+
+async function tokenFingerprint(authorization) {
+  const raw = String(authorization || '');
+  const token = raw.replace(/^Bearer\s+/i, '').trim();
+  if (!token) return '';
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  return Buffer.from(digest).toString('hex');
+}
+
+async function cacheIdentityFromViewer(authorization, viewer) {
+  if (!viewer?.success || !viewer.userId) return false;
+  const fp = await tokenFingerprint(authorization);
+  if (!fp) return false;
+  const now = Date.now();
+  identityCache.entries[fp] = {
+    userId:String(viewer.userId), email:String(viewer.email || ''), role:String(viewer.role || ''),
+    active:viewer.active !== false, permissions:viewer.permissions && typeof viewer.permissions === 'object' ? viewer.permissions : {},
+    isTeacher:!!viewer.isTeacher, assignedSubjects:viewer.assignedSubjects && typeof viewer.assignedSubjects === 'object' ? viewer.assignedSubjects : {},
+    isMaster:!!viewer.isMaster, isGodMode:!!viewer.isGodMode,
+    cachedAt:now, expiresAt:now + OFFLINE_SESSION_TTL_MS
+  };
+  await persistIdentityCache();
+  return true;
+}
+
+async function getCachedIdentity(authorization) {
+  const fp = await tokenFingerprint(authorization);
+  if (!fp) return null;
+  const item = identityCache.entries[fp];
+  if (!item || !item.active || Number(item.expiresAt || 0) < Date.now()) {
+    if (item) { delete identityCache.entries[fp]; await persistIdentityCache(); }
+    return null;
+  }
+  return item;
+}
+
+function permissionAllowed(identity, required) {
+  if (!identity) return false;
+  if (identity.isMaster || identity.isGodMode) return true;
+  const perms = identity.permissions || {};
+  const keys = Array.isArray(required) ? required : (required ? [required] : []);
+  return !keys.length || keys.some(k => perms[k] === true || perms[k] === 1 || perms[k] === '1');
+}
+
+const LOCAL_ACTION_PERMISSIONS = {
+  getViewerInfo: [],
+  getStudents: ['p_dossier','pa_add_student','pa_edit_student','pt_view_class_list','pt_view_student_profile','pt_view_history','pt_view_photo','pt_view_contact','pt_mark_attendance','pt_view_attendance','pt_enter_grades','pt_edit_grades','pt_view_bulletin','pt_view_class_perf','pt_view_ranking'],
+  getGrades: ['p_grades','pt_view_class_list','pt_view_student_profile','pt_view_history','pt_view_photo','pt_view_contact','pt_mark_attendance','pt_view_attendance','pt_enter_grades','pt_edit_grades','pt_view_bulletin','pt_view_class_perf','pt_view_ranking'],
+  getPayments: ['p_finance','pa_record_payment'],
+  getAttendance: ['p_attendance','pt_view_attendance','pt_mark_attendance'],
+  getStudentAttendance: ['p_attendance','pt_view_attendance','pt_mark_attendance'],
+  getAttendanceForStudent: ['p_attendance','pt_view_attendance','pt_mark_attendance'],
+  getTimetableData: ['p_staff','pa_teacher_affectation','p_settings'],
+  getStaffAssignments: ['p_staff','pa_teacher_affectation','pt_view_class_list','pt_view_student_profile','pt_view_history','pt_view_photo','pt_view_contact','pt_mark_attendance','pt_view_attendance','pt_enter_grades','pt_edit_grades','pt_view_bulletin','pt_view_class_perf','pt_view_ranking']
+};
+
+async function loadStore() {
+  try {
+    const raw = await fs.readFile(STORE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.version === STORE_VERSION && parsed.tables && typeof parsed.tables === 'object') return parsed;
+  } catch (_) {}
+  return { version: STORE_VERSION, siteId: SITE_ID, edgeId: EDGE_ID, tables: {}, cursors: {}, updatedAt: null };
+}
+
+function persistStore() {
+  const snapshot = JSON.stringify(store, null, 2);
+  storePersistChain = storePersistChain.then(() => fs.writeFile(STORE_FILE, snapshot, 'utf8')).catch(() => {});
+  return storePersistChain;
+}
+
+function storeTable(table) {
+  if (!store.tables[table]) store.tables[table] = {};
+  return store.tables[table];
+}
+
+function storeUpsert(table, row) {
+  if (!row || !row.id) return;
+  storeTable(table)[String(row.id)] = { ...row, cachedAt: new Date().toISOString() };
+}
+
+function storeApplyRows(table, rows, cursor) {
+  for (const row of rows || []) {
+    if (!row?.id) continue;
+    if (row.deleted || row.deletedAt) {
+      storeTable(table)[String(row.id)] = { ...row, deleted: true, cachedAt: new Date().toISOString() };
+    } else {
+      storeUpsert(table, row);
+    }
+  }
+  if (cursor) store.cursors[table] = cursor;
+  store.updatedAt = new Date().toISOString();
+}
+
+function localDelta(table, cursor, limit = 500) {
+  const rawCursor = String(cursor || '1970-01-01T00:00:00.000Z');
+  const sep = rawCursor.lastIndexOf('|');
+  const since = sep > 0 ? rawCursor.slice(0, sep) : rawCursor;
+  const sinceId = sep > 0 ? rawCursor.slice(sep + 1) : '';
+  const rows = Object.values(store.tables[table] || {})
+    .filter(r => r && (r.updatedAt || r.updated_at) && ((r.updatedAt || r.updated_at) > since || ((r.updatedAt || r.updated_at) === since && String(r.id) > sinceId)))
+    .sort((a,b) => String(a.updatedAt || a.updated_at).localeCompare(String(b.updatedAt || b.updated_at)) || String(a.id).localeCompare(String(b.id)))
+    .slice(0, Math.min(Math.max(Number(limit) || 500, 1), 2000));
+  const nextCursor = rows.length ? `${rows.at(-1).updatedAt || rows.at(-1).updated_at}|${rows.at(-1).id}` : rawCursor;
+  return { table, rows: rows.map(r => ({...r, updatedAt:r.updatedAt || r.updated_at, deletedAt:r.deletedAt || r.deleted_at || null, deleted:!!(r.deleted || r.deletedAt || r.deleted_at)})), cursor: nextCursor, hasMore: rows.length === Math.min(Math.max(Number(limit) || 500, 1), 2000) };
+}
+
+function applyLocalEntry(entry) {
+  const table = String(entry?.table || '');
+  if (!table || !entry?.id) return;
+  const fields = entry.fields && typeof entry.fields === 'object' ? entry.fields : {};
+  const existing = storeTable(table)[String(entry.id)] || {};
+  const ts = new Date().toISOString();
+  const version = Math.max(Number(existing.version || 0) + 1, Number(entry.baseVersion || 0) + 1);
+  if (entry.op === 'delete') {
+    storeTable(table)[String(entry.id)] = { ...existing, id:String(entry.id), version, updatedAt:ts, deletedAt:ts, deleted:true, cachedAt:ts };
+  } else if (entry.op === 'upsert') {
+    storeTable(table)[String(entry.id)] = { ...existing, id:String(entry.id), version, ...fields, fields, updatedAt:ts, deletedAt:null, deleted:false, cachedAt:ts };
+  }
+  store.updatedAt = ts;
+}
+
+async function loadQueue() {
+  try {
+    const raw = await fs.readFile(QUEUE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) { return []; }
+}
+
+function persistQueue() {
+  const snapshot = JSON.stringify(queue, null, 2);
+  persistChain = persistChain.then(() => fs.writeFile(QUEUE_FILE, snapshot, 'utf8')).catch(() => {});
+  return persistChain;
+}
+
+function cors(req, res) {
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Eduhaiti-Edge-Id, X-Eduhaiti-Site-Id');
+}
+function json(res, body, status = 200) {
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.end(JSON.stringify(body));
+}
+async function readBody(req) {
+  let total = 0; const chunks = [];
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > MAX_BODY) throw new Error('Corps de requête trop volumineux.');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+async function logEvent(kind, data) {
+  const row = { ts: new Date().toISOString(), kind, siteId: SITE_ID, edgeId: EDGE_ID, ...data };
+  await fs.appendFile(EVENTS_FILE, JSON.stringify(row) + '\n', 'utf8').catch(() => {});
+}
+
+function cloudTarget(reqUrl) {
+  return new URL(reqUrl, CLOUD_BASE_URL);
+}
+
+function forwardedHeaders(req) {
+  const headers = new Headers();
+  for (const [k,v] of Object.entries(req.headers)) {
+    if (!v || ['host','content-length','connection'].includes(k.toLowerCase())) continue;
+    headers.set(k, Array.isArray(v) ? v.join(',') : v);
+  }
+  headers.set('X-Eduhaiti-Edge-Id', EDGE_ID);
+  headers.set('X-Eduhaiti-Site-Id', SITE_ID);
+  return headers;
+}
+
+async function proxy(req, res, body) {
+  if (!CLOUD_BASE_URL) return json(res, { success:false, error:'EDU_EDGE_CLOUD_URL non configurée.' }, 503);
+  const target = cloudTarget(req.url);
+  const r = await fetch(target, {
+    method:req.method,
+    headers:forwardedHeaders(req),
+    body: body?.length ? body : undefined,
+    signal: AbortSignal.timeout(12000)
+  });
+  const buf = Buffer.from(await r.arrayBuffer());
+  const action = target.searchParams.get('action') || (() => { try { return JSON.parse(body?.toString('utf8') || '{}')?.action || ''; } catch { return ''; } })();
+  if (r.ok && action === 'getViewerInfo') {
+    try { const viewer = JSON.parse(buf.toString('utf8')); await cacheIdentityFromViewer(req.headers.authorization, viewer); } catch (_) {}
+  }
+  res.statusCode = r.status;
+  r.headers.forEach((v,k) => { if (!['transfer-encoding','content-encoding','content-length'].includes(k.toLowerCase())) res.setHeader(k,v); });
+  res.end(buf);
+}
+
+function isSyncPush(req, parsedBody) {
+  const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  return u.searchParams.get('action') === 'syncPush' || parsedBody?.action === 'syncPush';
+}
+
+function queueKey(body) {
+  const entries = Array.isArray(body?.data?.entries) ? body.data.entries : [];
+  return entries.map(e => String(e?.idempotencyKey || '')).filter(Boolean).join('|');
+}
+
+async function enqueueSyncPush(req, body) {
+  const entries = Array.isArray(body?.data?.entries) ? body.data.entries : [];
+  if (!entries.length) throw new Error('Aucune entrée à synchroniser.');
+  const keys = entries.map(e => String(e?.idempotencyKey || '')).filter(Boolean);
+  if (keys.length !== entries.length) throw new Error('Une ou plusieurs entrées n’ont pas de clé d’idempotence.');
+
+  const key = queueKey(body);
+  const existing = queue.find(x => x.key === key);
+  if (!existing) {
+    queue.push({
+      id: `edgeq_${Date.now()}_${Math.random().toString(36).slice(2,10)}`,
+      key,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      attempts: 0,
+      status: 'pending',
+      deviceId: body?.data?.deviceId || null,
+      entryCount: entries.length,
+      request: {
+        path: new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname + new URL(req.url, `http://${req.headers.host || 'localhost'}`).search,
+        authorization: req.headers.authorization || null,
+        body
+      }
+    });
+    for (const entry of entries) applyLocalEntry(entry);
+    await persistStore();
+    await persistQueue();
+    await logEvent('sync_queued', { queueId: queue.at(-1).id, deviceId: body?.data?.deviceId || null, entryCount: entries.length });
+  }
+  return { entries, key, queueId: (existing || queue.find(x => x.key === key)).id };
+}
+
+function queuedOutcomes(entries, queueId) {
+  return entries.map(e => ({
+    idempotencyKey: e.idempotencyKey,
+    id: e.id,
+    table: e.table,
+    status: 'queued',
+    edgeQueueId: queueId
+  }));
+}
+
+async function pushQueueItem(item) {
+  if (!CLOUD_BASE_URL) return false;
+  const reqData = item.request;
+  const target = new URL(reqData.path, CLOUD_BASE_URL);
+  const headers = new Headers({ 'Content-Type':'application/json', 'Accept':'application/json' });
+  if (reqData.authorization) headers.set('Authorization', reqData.authorization);
+  headers.set('X-Eduhaiti-Edge-Id', EDGE_ID);
+  headers.set('X-Eduhaiti-Site-Id', SITE_ID);
+  try {
+    const r = await fetch(target, { method:'POST', headers, body:JSON.stringify(reqData.body), signal:AbortSignal.timeout(12000) });
+    const text = await r.text();
+    let body; try { body = JSON.parse(text); } catch { body = { success:false, error:text || `HTTP ${r.status}` }; }
+    if (!r.ok || body?.success === false) {
+      item.attempts = Number(item.attempts || 0) + 1;
+      item.updatedAt = new Date().toISOString();
+      item.lastError = body?.error || `HTTP ${r.status}`;
+      if (item.attempts >= MAX_RETRIES && r.status >= 400 && r.status < 500) item.status = 'failed';
+      return false;
+    }
+    cloudReachable = true;
+    // Cloud is authoritative. Reconcile successful outcomes into the local
+    // site store so subsequent offline syncPull requests can be served locally.
+    const outcomes = Array.isArray(body?.outcomes) ? body.outcomes : [];
+    const byKey = new Map((reqData.body?.data?.entries || []).map(e => [e.idempotencyKey, e]));
+    for (const outcome of outcomes) {
+      const original = byKey.get(outcome?.idempotencyKey);
+      if (!original) continue;
+      if (['applied','already_applied','duplicate'].includes(outcome?.status)) {
+        if (outcome.status === 'duplicate' && outcome.canonicalId) {
+          // Keep the local row as a tombstone; the next Cloud pull supplies the canonical row.
+          storeTable(original.table)[String(original.id)] = { id:String(original.id), version:Number(outcome.serverVersion || 1), updatedAt:outcome.serverUpdatedAt || new Date().toISOString(), deleted:true, deletedAt:outcome.serverUpdatedAt || new Date().toISOString(), cachedAt:new Date().toISOString() };
+        } else {
+          applyLocalEntry(original);
+          const local = storeTable(original.table)[String(original.id)];
+          if (outcome.version) local.version = Number(outcome.version);
+          if (outcome.updatedAt) local.updatedAt = outcome.updatedAt;
+        }
+      }
+    }
+    await persistStore();
+    item.status = 'applied';
+    item.updatedAt = new Date().toISOString();
+    item.lastResult = body;
+    await logEvent('sync_flushed', { queueId:item.id, attempts:item.attempts, entryCount:item.entryCount });
+    return true;
+  } catch (e) {
+    cloudReachable = false;
+    item.attempts = Number(item.attempts || 0) + 1;
+    item.updatedAt = new Date().toISOString();
+    item.lastError = e?.message || String(e);
+    return false;
+  }
+}
+
+async function flushQueue() {
+  if (flushRunning || !CLOUD_BASE_URL || !queue.length) return;
+  flushRunning = true;
+  try {
+    for (const item of queue.filter(x => x.status === 'pending').slice(0, 20)) {
+      await pushQueueItem(item);
+    }
+    queue = queue.filter(x => x.status !== 'applied');
+    await persistQueue();
+  } finally { flushRunning = false; }
+}
+
+setInterval(() => { flushQueue().catch(() => {}); }, RETRY_MS).unref();
+flushQueue().catch(() => {});
+
+const server = http.createServer(async (req,res) => {
+  cors(req,res);
+  if (req.method === 'OPTIONS') return res.end();
+  try {
+    const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+    if (u.pathname === '/edge/health') {
+      const pending = queue.filter(x => x.status === 'pending').length;
+      const failed = queue.filter(x => x.status === 'failed').length;
+      return json(res, { success:true, mode:'edge-first-v2', siteId:SITE_ID, edgeId:EDGE_ID, cloudConfigured:!!CLOUD_BASE_URL, cloudReachable, pending, failed, now:new Date().toISOString() });
+    }
+    if (u.pathname === '/edge/config' || u.pathname === '/edge/discovery') {
+      return json(res, {
+        success:true, siteId:SITE_ID, edgeId:EDGE_ID, mode:'edge-first-v2',
+        cloudConfigured:!!CLOUD_BASE_URL,
+        endpoints:{ health:'/edge/health', discovery:'/edge/discovery', queue:'/edge/queue', syncStatus:'/edge/sync-status', dataStatus:'/edge/data-status' },
+        discovery:{ siteId:SITE_ID, edgeId:EDGE_ID, edgeUrl:`http://${req.headers.host || `localhost:${PORT}`}` }
+      });
+    }
+    if (u.pathname === '/edge/local-api' && req.method === 'GET') {
+      // Local business reads are a read-through cache only. IndexedDB on the
+      // terminal remains the first offline source; this endpoint is the site
+      // fallback when a terminal has no local snapshot of its own.
+      const authorization = String(req.headers.authorization || '').trim();
+      if (!authorization) return json(res, { success:false, error:'Authentification locale requise.' }, 401);
+      const identity = await getCachedIdentity(authorization);
+      if (!identity) return json(res, { success:false, error:'Session locale absente, expirée ou non renouvelée. Reconnectez-vous au Cloud/Edge avec Internet.' }, 401);
+      const action = String(u.searchParams.get('action') || '').trim();
+      const supported = new Set([
+        'getStudents','getGrades','getPayments','getAttendance',
+        'getStudentAttendance','getAttendanceForStudent',
+        'getTimetableData','getStaffAssignments'
+      ]);
+      if (!supported.has(action)) return json(res, { success:false, error:`Lecture locale non disponible pour ${action}.` }, 400);
+      if (!permissionAllowed(identity, LOCAL_ACTION_PERMISSIONS[action])) return json(res, { success:false, error:`Permission insuffisante pour ${action}.`, permissionDenied:true }, 403);
+      if (action === 'getViewerInfo') return json(res, { success:true, ...identity, offline:true, edgeServed:true, stale:true, siteId:SITE_ID, edgeId:EDGE_ID, generatedAt:new Date().toISOString(), identityCachedAt:new Date(identity.cachedAt).toISOString(), identityExpiresAt:new Date(identity.expiresAt).toISOString() });
+      const table = ({
+        getStudents:'students', getGrades:'grades', getPayments:'payments',
+        getAttendance:'attendance', getStudentAttendance:'attendance',
+        getAttendanceForStudent:'attendance', getTimetableData:'timetable',
+        getStaffAssignments:'teacher_assignments'
+      })[action];
+      const limit = Math.min(Math.max(Number(u.searchParams.get('limit') || 1000), 1), 5000);
+      const studentId = String(u.searchParams.get('studentId') || u.searchParams.get('id') || '').trim();
+      const date = String(u.searchParams.get('date') || '').trim().slice(0,10);
+      let rows = Object.values(store.tables[table] || {})
+        .filter(r => r && !r.deleted && !r.deletedAt);
+      if (studentId && ['attendance','grades','payments'].includes(table)) {
+        rows = rows.filter(r => String(r.fields?.student_id || r.student_id || '') === studentId);
+      }
+      if (date && table === 'attendance') {
+        rows = rows.filter(r => String(r.fields?.date || r.date || '').slice(0,10) === date);
+      }
+      rows.sort((a,b) => String(b.updatedAt || b.updated_at || '').localeCompare(String(a.updatedAt || a.updated_at || '')));
+      rows = rows.slice(0, limit);
+      const fieldsOf = r => ({ ...(r.fields || {}), id:r.id, version:r.version, updatedAt:r.updatedAt || r.updated_at, deletedAt:r.deletedAt || r.deleted_at || null });
+      let data = rows.map(fieldsOf);
+      if (action === 'getStudents') {
+        data = data.map(r => ({
+          StudentCode:r.student_code || r.StudentCode || r.id,
+          StudentID:r.student_code || r.id, id:r.student_code || r.id,
+          studentId:r.student_code || r.id,
+          FirstName:r.first_name || r.FirstName || '', LastName:r.last_name || r.LastName || '',
+          Phone:r.phone || r.Phone || '', Gender:r.gender || r.Gender || '',
+          BirthDate:r.birth_date || r.BirthDate || '', Address:r.address || r.Address || '',
+          PhotoURL:r.photo_url || r.PhotoURL || '',
+          CustomFields:typeof r.custom_fields === 'string' ? (()=>{try{return JSON.parse(r.custom_fields||'{}')}catch{return {}}})() : (r.custom_fields || {}),
+          CurrentLevel:r.current_level || '', Section:r.section || '',
+          Active:r.active === 0 || r.active === '0' ? 'FALSE' : 'TRUE',
+          CreatedAt:r.created_at || r.CreatedAt || null, UpdatedAt:r.updated_at || r.UpdatedAt || r.updatedAt || null
+        }));
+      }
+      return json(res, { success:true, data, count:data.length, action, table, edgeServed:true, cloudReachable, stale:true, siteId:SITE_ID, edgeId:EDGE_ID, generatedAt:new Date().toISOString(), viewer:{userId:identity.userId,email:identity.email,role:identity.role,isTeacher:identity.isTeacher,isMaster:identity.isMaster,isGodMode:identity.isGodMode} });
+    }
+
+    if (u.pathname === '/edge/data-status' && req.method === 'GET') {
+      const tables = Object.fromEntries(Object.entries(store.tables).map(([t, rows]) => [t, Object.keys(rows || {}).length]));
+      return json(res, { success:true, siteId:SITE_ID, edgeId:EDGE_ID, tables, cursors:store.cursors, updatedAt:store.updatedAt, storeFile:STORE_FILE });
+    }
+
+    const localSyncPath = u.pathname.startsWith('/api') || u.pathname === '/';
+    if (localSyncPath && u.searchParams.get('action') === 'syncPull' && req.method === 'GET') {
+      const table = u.searchParams.get('table');
+      const cursor = u.searchParams.get('cursor') || '';
+      const limit = Number(u.searchParams.get('limit') || 500);
+      if (!table) return json(res, { success:false, error:'table manquante.' }, 400);
+      // Refresh the local site store from Cloud whenever possible. If Cloud is
+      // unreachable, serve the most recent local snapshot instead.
+      let cloudError = null;
+      if (CLOUD_BASE_URL) {
+        try {
+          const target = cloudTarget(req.url);
+          const r = await fetch(target, { method:'GET', headers:forwardedHeaders(req), signal:AbortSignal.timeout(12000) });
+          const text = await r.text();
+          let body; try { body = JSON.parse(text); } catch { body = null; }
+          if (r.ok && body?.success !== false) {
+            cloudReachable = true;
+            storeApplyRows(table, Array.isArray(body?.rows) ? body.rows : [], body?.cursor || cursor);
+            await persistStore();
+            return json(res, { ...body, edgeServed:false, edgeStoreRefreshed:true, siteId:SITE_ID, edgeId:EDGE_ID });
+          }
+          cloudError = body?.error || `HTTP ${r.status}`;
+        } catch (e) { cloudReachable = false; cloudError = e?.message || String(e); }
+      }
+      const local = localDelta(table, cursor, limit);
+      if (local.rows.length || Object.keys(store.tables[table] || {}).length) {
+        return json(res, { success:true, ...local, edgeServed:true, cloudReachable:false, siteId:SITE_ID, edgeId:EDGE_ID, stale:true, cloudError });
+      }
+      return json(res, { success:false, error:cloudError || 'Aucune donnée locale disponible sur cet Edge.', edgeServed:true, siteId:SITE_ID, edgeId:EDGE_ID }, 503);
+    }
+
+    if (u.pathname === '/edge/queue' && req.method === 'GET') {
+      return json(res, { success:true, siteId:SITE_ID, edgeId:EDGE_ID, pending:queue.filter(x=>x.status==='pending').length, failed:queue.filter(x=>x.status==='failed').length, items:queue.map(x=>({ id:x.id, deviceId:x.deviceId, entryCount:x.entryCount, status:x.status, attempts:x.attempts, createdAt:x.createdAt, updatedAt:x.updatedAt, lastError:x.lastError||null })) });
+    }
+    if (u.pathname === '/edge/sync-status' && req.method === 'GET') {
+      const deviceId = u.searchParams.get('deviceId');
+      const items = queue.filter(x => !deviceId || x.deviceId === deviceId).map(x => ({ id:x.id, deviceId:x.deviceId, entryCount:x.entryCount, status:x.status, attempts:x.attempts, createdAt:x.createdAt, updatedAt:x.updatedAt, lastError:x.lastError||null, lastResult:x.lastResult||null }));
+      return json(res, { success:true, items });
+    }
+
+    const bodyBuf = (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') ? await readBody(req) : null;
+    let parsedBody = null;
+    if (bodyBuf?.length) { try { parsedBody = JSON.parse(bodyBuf.toString('utf8')); } catch (_) {} }
+
+    if (localSyncPath) {
+      if (isSyncPush(req, parsedBody)) {
+        const entries = Array.isArray(parsedBody?.data?.entries) ? parsedBody.data.entries : [];
+        try {
+          const queued = await enqueueSyncPush(req, parsedBody);
+          // Try immediately. If Cloud is available, this normally becomes a
+          // normal synchronous response. If not, the durable queue accepts it.
+          if (CLOUD_BASE_URL) {
+            const item = queue.find(x => x.id === queued.queueId);
+            if (item) await pushQueueItem(item);
+            const latest = queue.find(x => x.id === queued.queueId);
+            if (latest?.status === 'applied') {
+              queue = queue.filter(x => x.id !== queued.queueId);
+              await persistQueue();
+              return json(res, latest.lastResult || { success:true, outcomes:[] });
+            }
+          }
+          return json(res, { success:true, edgeQueued:true, siteId:SITE_ID, edgeId:EDGE_ID, outcomes:queuedOutcomes(entries, queued.queueId), conflicts:0, duplicates:0 });
+        } catch (e) {
+          return json(res, { success:false, error:e?.message || String(e) }, 400);
+        }
+      }
+      await logEvent('proxy', { method:req.method, path:u.pathname, action:u.searchParams.get('action') || parsedBody?.action || null });
+      return proxy(req,res,bodyBuf);
+    }
+    return json(res,{success:false,error:'Route Edge inconnue.'},404);
+  } catch (e) {
+    await logEvent('error',{error:e?.message || String(e)});
+    return json(res,{success:false,error:e?.message || String(e)},500);
+  }
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`EduHaïti Edge v2 ${EDGE_ID} — site ${SITE_ID} — http://${HOST}:${PORT}`);
+  console.log(`Queue locale : ${QUEUE_FILE}`);
+  if (!CLOUD_BASE_URL) console.warn('EDU_EDGE_CLOUD_URL n\'est pas configurée : les syncPush seront conservés localement.');
+});

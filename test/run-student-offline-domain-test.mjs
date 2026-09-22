@@ -1,0 +1,18 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const root=new URL('../frontend-dist/',import.meta.url);
+const html=fs.readFileSync(new URL('index.html',root),'utf8');
+const domain=fs.readFileSync(new URL('offline-domain.js',root),'utf8');
+const students=fs.readFileSync(new URL('offline-student-domain.js',root),'utf8');
+const integration=fs.readFileSync(new URL('offline-domain-integration.js',root),'utf8');
+assert.match(html,/offline-student-domain\.js/);
+assert.match(students,/MAX_ADDRESS_LENGTH = 21/);
+assert.match(students,/async function savePhoto/);
+assert.match(students,/saveMediaBlob/);
+assert.match(students,/queueMediaUpload/);
+assert.match(students,/async function search/);
+assert.match(students,/async function remove/);
+assert.match(domain,/action === 'dropStudent'/);
+assert.match(domain,/op: 'delete'/);
+assert.match(integration,/dropStudent/);
+console.log('PWA-0060 student offline domain test: PASS');

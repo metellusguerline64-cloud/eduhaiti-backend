@@ -1,0 +1,242 @@
+CREATION MANUELLE D'UNE ECOLE - D1 DEDIEE
+============================================
+
+Exemple utilise :
+  Sous-domaine : stmarc
+  Organisation : STMARC
+  Binding      : DB_STMARC
+
+Remplacer ces valeurs par celles de votre ecole.
+
+IMPORTANT
+---------
+- Ne pas recreer meigens-master-db.
+- Chaque ecole doit avoir sa propre base D1.
+- Garder CLOUDFLARE_API_TOKEN hors du frontend.
+- Le formulaire d'inscription ne demande pas de PIN.
+- Le téléphone sert uniquement de secret initial; un nouveau PIN est impose a la premiere connexion.
+- Executer les commandes depuis la racine du projet.
+
+1. CREER LA BASE D1
+-------------------
+
+npx wrangler d1 create eduhaiti-db-stmarc
+
+Noter le database_id retourne par Cloudflare.
+
+2. INITIALISER LE SCHEMA
+------------------------
+
+npx wrangler d1 execute eduhaiti-db-stmarc `
+  --remote `
+  --file=schema.sql
+
+3. APPLIQUER LES MIGRATIONS
+---------------------------
+
+Get-ChildItem migrations\*.sql | Sort-Object Name | ForEach-Object {
+  npx wrangler d1 execute eduhaiti-db-stmarc `
+    --remote `
+    --file=$_.FullName
+}
+
+NOTE : sur une base neuve, les migrations 0005, 0007, 0008, 0019 et 0029
+afficheront une erreur "duplicate column name" — c'est normal et documente
+dans l'en-tete de chacun de ces fichiers : schema.sql contient deja ces
+colonnes, ces migrations ne servent qu'a mettre a niveau une base ANCIENNE
+qui a ete creee avant leur ajout. Continuer la boucle normalement.
+
+4. AJOUTER LE BINDING DANS wrangler.toml
+----------------------------------------
+
+Ajouter ce bloc avec le vrai database_id :
+
+[[d1_databases]]
+binding = "DB_STMARC"
+database_name = "eduhaiti-db-stmarc"
+database_id = "REMPLACER_PAR_LE_DATABASE_ID"
+
+5. AJOUTER LE TENANT
+--------------------
+
+Dans src/lib/tenants.js :
+
+export const TENANTS = {
+  mt1967: { orgId: "MT1967", dbBinding: "DB_MT1967" },
+  stmarc: { orgId: "STMARC", dbBinding: "DB_STMARC" },
+};
+
+6. DEPLOYER LE WORKER
+---------------------
+
+npm run deploy
+
+7. AJOUTER LE DOMAINE PAGES
+---------------------------
+
+Dans Cloudflare Dashboard :
+  Workers & Pages
+  -> projet eduflow
+  -> Custom domains
+  -> Set up a custom domain
+  -> stmarc.eduflow.win
+
+Cloudflare doit remplacer le DNS existant de stmarc par le domaine Pages.
+La route API *.eduflow.win/api/* reste dirigee vers le Worker.
+
+8. TESTER L'API
+---------------
+
+curl.exe -4 "https://stmarc.eduflow.win/api/?action=ping"
+
+Reponse attendue :
+
+{"success":true,"status":"online"}
+
+9. URL DE LA PWA
+----------------
+
+https://stmarc.eduflow.win
+
+URL API :
+
+https://stmarc.eduflow.win/api
+
+10. VERIFIER L'ISOLATION
+------------------------
+
+- stmarc.eduflow.win doit utiliser DB_STMARC.
+- mt1967.eduflow.win doit utiliser DB_MT1967.
+- Ne jamais utiliser la base d'une autre ecole.
+- Un sous-domaine inconnu doit retourner une erreur 404.
+
+OPTION AUTOMATIQUE
+------------------
+
+Le provisioner securise existe deja :
+
+npm run provision:school -- --subdomain stmarc --org-id STMARC --apply
+
+Il necessite les variables d'environnement dans une CI securisee :
+
+$env:CLOUDFLARE_ACCOUNT_ID = "VOTRE_ACCOUNT_ID"
+$env:CLOUDFLARE_API_TOKEN = "VOTRE_TOKEN_CI"
+
+Le token doit avoir les droits D1, Workers, Pages et DNS.
+
+CONFIGURATION MANUELLE D'UNE INSCRIPTION DEJA FAITE
+====================================================
+
+L'inscription a deja enregistre ces informations dans MASTER_DB/orgs :
+
+  business_id          -> identifiant organisation, par exemple MT4821
+  business_name        -> nom de l'ecole
+  email               -> email de l'administrateur PWA
+  subdomain           -> sous-domaine genere automatiquement, par exemple stmarc
+  pin_hash             -> hash du numero de telephone utilise a l'inscription
+  provisioning_status  -> doit devenir ACTIVE a la fin
+
+Le numero de telephone en clair n'est pas utilise comme mot de passe permanent.
+Il est hashé dans MASTER_DB, puis le premier login force la creation d'un PIN
+personnel. Ne jamais utiliser reg_token comme mot de passe.
+
+A. RECUPERER LES INFORMATIONS DE L'INSCRIPTION
+-----------------------------------------------
+
+Remplacer EMAIL_DE_L_ECOLE par l'email utilise dans le formulaire :
+
+npx wrangler d1 execute meigens-master-db --remote --json `
+  --command="SELECT business_id,business_name,email,subdomain,pin_hash,provisioning_status FROM orgs WHERE LOWER(email)=LOWER('EMAIL_DE_L_ECOLE') AND deleted_at IS NULL"
+
+Exemple de correspondance :
+
+  business_id = MT4821  -> orgId = "MT4821"
+  subdomain   = stmarc  -> URL = https://stmarc.eduflow.win
+  email       = admin@stmarc.ht -> utilisateur ADMIN
+  pin_hash    = hash SHA-256 du telephone -> users.password_hash
+
+B. CHOISIR LE NOM DE LA BASE D1
+-------------------------------
+
+Le nom doit etre derive du subdomain, jamais choisi au hasard :
+
+  subdomain = stmarc
+  database  = eduhaiti-db-stmarc
+  binding   = DB_MT4821
+
+C. CREER ET INITIALISER LA BASE
+--------------------------------
+
+npx wrangler d1 create eduhaiti-db-stmarc
+
+Noter le database_id retourne, puis :
+
+npx wrangler d1 execute eduhaiti-db-stmarc --remote --file=schema.sql
+
+Get-ChildItem migrations\*.sql | Sort-Object Name | ForEach-Object {
+  npx wrangler d1 execute eduhaiti-db-stmarc --remote --file=$_.FullName
+}
+
+D. CREER L'ADMINISTRATEUR PWA
+------------------------------
+
+Creer un fichier create-admin.sql dans Notepad. Remplacer les valeurs entre
+guillemets par business_id, email et pin_hash recuperes a l'etape A :
+
+INSERT INTO users
+  (id,user_id,email,username,name,password_hash,role,permissions_json,is_master,active)
+VALUES
+  ('UUID_ADMIN','MT4821-ADMIN','admin@stmarc.ht','admin@stmarc.ht',
+  'Administrateur','PHONE_HASH_64_CARACTERES','ADMIN',
+   '{"p_dossier":true,"p_staff":true,"p_settings":true,"p_audit":true,"pa_add_student":true,"pa_edit_student":true,"pa_manage_users":true}',
+   1,1);
+
+Generer UUID_ADMIN avec :
+
+[guid]::NewGuid().ToString()
+
+Executer :
+
+npx wrangler d1 execute eduhaiti-db-stmarc --remote --file=create-admin.sql
+
+E. AJOUTER LE BINDING ET LE TENANT
+----------------------------------
+
+Dans wrangler.toml :
+
+[[d1_databases]]
+binding = "DB_MT4821"
+database_name = "eduhaiti-db-stmarc"
+database_id = "DATABASE_ID_RETOURNE"
+
+Dans src/lib/tenants.js :
+
+stmarc: { orgId: "MT4821", dbBinding: "DB_MT4821" },
+
+F. ACTIVER L'ORGANISATION APRES VERIFICATION
+---------------------------------------------
+
+Ne faire cette etape qu'apres la creation D1 et de l'admin :
+
+npx wrangler d1 execute meigens-master-db --remote `
+  --command="UPDATE orgs SET provisioning_status='ACTIVE', provisioned_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now'), provisioning_error=NULL WHERE business_id='MT4821'"
+
+G. DEPLOYER ET AJOUTER LE DOMAINE PAGES
+---------------------------------------
+
+npm run deploy
+
+Dans Cloudflare Pages -> eduflow -> Custom domains, ajouter :
+
+  stmarc.eduflow.win
+
+La connexion finale se fera avec :
+
+  URL  : https://stmarc.eduflow.win
+  API  : https://stmarc.eduflow.win/api
+  Email: admin@stmarc.ht
+  Secret initial : le numero de telephone utilise lors de l'inscription
+  Ensuite        : creer le PIN personnel demande par la PWA
+
+Si une etape echoue, laisser provisioning_status a PROVISIONING_FAILED et
+ne pas activer l'organisation.

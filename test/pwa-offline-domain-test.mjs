@@ -1,0 +1,18 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const root = new URL('../frontend-dist/', import.meta.url);
+const html = fs.readFileSync(new URL('index.html', root), 'utf8');
+const sw = fs.readFileSync(new URL('sw.js', root), 'utf8');
+const domain = fs.readFileSync(new URL('offline-domain.js', root), 'utf8');
+assert.match(html, /offline-domain\.js/);
+assert.match(html, /EDU_OFFLINE_DOMAIN\.hydrateLocalStorage/);
+assert.match(html, /_syncTypedOfflineDomains_/);
+assert.match(html, /callApiHub_\('syncPull'/);
+assert.match(domain, /eduhaiti_offline_domain_v1/);
+assert.match(domain, /snapshots/);
+assert.match(domain, /records/);
+assert.match(domain, /outbox/);
+assert.match(domain, /delete out\.password/);
+assert.match(sw, /\/offline-domain\.js/);
+assert.match(sw, /self\.addEventListener\('sync'/);
+console.log('PWA offline domain architecture test: PASS');

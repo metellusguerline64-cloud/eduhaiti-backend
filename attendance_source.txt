@@ -1,0 +1,361 @@
+}
+
+function updateExamSettings_(payload) {
+  return updateSaaSSettings_({ name:'EXAM_SETTINGS_' + (payload.ExamTitle||'').replace(/[^a-z0-9]/gi,'_'), value:payload }, null);
+}
+
+// ============================================================
+// ATTENDANCE
+// ============================================================
+function _invalidateAttendanceDerivedCaches_(ssInput) {
+  try {
+    const ss = ssInput || getSS_();
+    const cache = CacheService.getScriptCache();
+    const ssId = ss.getId();
+    cache.remove('STUDENT_ATTENDANCE_PCT_' + ssId);
+    cache.remove('SCHOOL_INIT_CACHE_WARM_' + ssId);
+  } catch (_e) {}
+}
+
+function recordStudentAttendance_(payload) {
+  try {
+    const ss        = getSS_();
+    const term      = String(payload.shortCode || payload.studentCode || '').trim();
+    const veri      = verifyStudentByLast4_(term);
+    if (!veri.found) return { success:false, error:'Aucun eleve pour: ' + term };
+    const studentId = veri.student.Student_ID;
+    const name      = veri.student.Student_Name;
+    const tz        = Session.getScriptTimeZone();
+    const dateStr   = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    const timeStr   = Utilities.formatDate(new Date(), tz, 'HH:mm:ss');
+    const sh        = ss.getSheetByName('attendance');
+    if (!sh) throw new Error("Table 'attendance' introuvable.");
+    const data    = sh.getDataRange().getValues();
+    const h       = data[0].map(x => String(x).toUpperCase().trim());
+    const iSid    = h.indexOf('STUDENTID');
+    const iDate   = h.indexOf('DATE');
+    for (let i = data.length-1; i >= 1; i--) {
+      const rowDate = data[i][iDate] instanceof Date
+        ? Utilities.formatDate(data[i][iDate], tz, 'yyyy-MM-dd')
+        : String(data[i][iDate]);
+      if (String(data[i][iSid]).trim() === studentId && rowDate === dateStr) {
+        writeAuditLog_('ATTENDANCE_DUPLICATE', studentId, 'status:' + (payload.status||'PRESENT') + ',date:' + dateStr, 'p_attendance', true);
+        return { success:false, alreadyScanned:true, studentName:name, message:name + ' déjà pointé aujourd\'hui.' };
+      }
+    }
+    const histMap = _buildActiveHistoryMap(ss);
+    const hist    = histMap[studentId.toUpperCase().trim()];
+    const meta    = JSON.stringify({ method: payload.method||'KIOSK', time:timeStr });
+    sh.appendRow([
+      'ATT-' + Utilities.getUuid().substring(0,8),
+      hist ? hist.historyId : '',
+      studentId,
+      hist ? hist.level : '',
+      new Date(),
+      payload.status || 'PRESENT',
+      Session.getActiveUser().getEmail() || 'KIOSK',
+      meta
+    ]);
+    _invalidateAttendanceDerivedCaches_(ss);
+    writeAuditLog_('ATTENDANCE', studentId, 'status:' + (payload.status||'PRESENT'), 'p_attendance');
+    return { success:true, studentName:name, studentId, time:timeStr, message:'Présence confirmée pour ' + name };
+  } catch(e) {
+    try { writeAuditLog_('ATTENDANCE_FAIL', String((payload && (payload.studentCode || payload.shortCode)) || '').trim() || 'UNKNOWN', e.message, 'p_attendance', true); } catch (_ae) {}
+    return { success:false, error:e.message };
+  }
+}
+
+function recordBulkAttendance_(records, auth) {
+  try {
+    const ss  = getSS_();
+    const sh  = ss.getSheetByName('attendance');
+    const tz  = Session.getScriptTimeZone();
+    const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    const histMap = _buildActiveHistoryMap(ss);
+    const viewerGuardContext = auth && auth.token ? auth : null;
+    const data  = sh.getLastRow() > 1 ? sh.getDataRange().getValues() : [sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0]];
+    const h     = data[0].map(x => String(x).toUpperCase().trim());
+    const iSid  = h.indexOf('STUDENTID');
+    const iDate = h.indexOf('DATE');
+    const existing = new Set();
+    data.slice(1).forEach(r => {
+      const d = r[iDate] instanceof Date ? Utilities.formatDate(r[iDate],tz,'yyyy-MM-dd') : String(r[iDate]);
+      if (d === today) existing.add(String(r[iSid]).trim());
+    });
+    const newRows = [];
+    const appendedRows = [];
+    // FIX (kiosk "déjà pointé" faussement affiché dès le PREMIER scan) :
+    // cette fonction ne renvoyait qu'un compteur global `processed`, et le
+    // frontend (processStudentKioskScan_) traitait TOUT `success:true` avec
+    // `processed:0` comme "déjà pointé" — alors que `processed:0` pouvait
+    // aussi venir d'un rejet silencieux de ensureViewerCanAccessStudentScope_
+    // (token de session kiosk expiré/hors-scope), d'un `rec.id` manquant, ou
+    // d'un `rec.type` inattendu. Ces trois causes n'ont RIEN à voir avec un
+    // doublon réel, mais s'affichaient toutes comme "élève déjà pointé
+    // aujourd'hui" même sur un tout premier scan. On construit maintenant un
+    // détail par enregistrement (`results`) avec une raison explicite, pour
+    // que le frontend puisse distinguer un vrai doublon d'un échec silencieux.
+    const results = [];
+    const inputRows = Array.isArray(records) ? records : [];
+    inputRows.forEach(rec => {
+      const sid = String(rec && rec.id || '').trim();
+      if (!rec || rec.type !== 'STUDENT') {
+        results.push({ id: sid, ok:false, reason:'INVALID_TYPE' });
+        return;
+      }
+      if (!sid) {
+        results.push({ id: sid, ok:false, reason:'MISSING_ID' });
+        return;
+      }
+      if (existing.has(sid)) {
+        results.push({ id: sid, ok:false, reason:'ALREADY_SCANNED' });
+        return;
+      }
+      if (viewerGuardContext) {
+        const guard = ensureViewerCanAccessStudentScope_(sid, viewerGuardContext);
+        if (!guard.success) {
+          results.push({ id: sid, ok:false, reason:'PERMISSION_DENIED', error: guard.error || '' });
+          return;
+        }
+      }
+      const hist = histMap[String(rec.id).toUpperCase().trim()];
+      newRows.push([
+        'ATT-' + Utilities.getUuid().substring(0,8),
+        hist ? hist.historyId : '',
+        sid,
+        hist ? hist.level : '',
+        new Date(),
+        rec.status || 'PRESENT',
+        Session.getActiveUser().getEmail() || 'BULK',
+        JSON.stringify({ method:'BULK', time:Utilities.formatDate(new Date(),tz,'HH:mm:ss') })
+      ]);
+      existing.add(sid);
+      appendedRows.push({ sid: sid, status: rec.status || 'PRESENT' });
+      results.push({ id: sid, ok:true, reason:'RECORDED' });
+    });
+    if (newRows.length > 0) {
+      sh.getRange(sh.getLastRow()+1, 1, newRows.length, newRows[0].length).setValues(newRows);
+      _invalidateAttendanceDerivedCaches_(ss);
+      appendedRows.forEach(function(entry) {
+        writeAuditLog_('BULK_ATTENDANCE', entry.sid, 'status:' + String(entry.status || 'PRESENT'), 'p_attendance');
+      });
+      // Parent checkout push — real-time (not part of the polling pass in
+      // checkAndPushParentAlerts_, since a kiosk "Sortie" scan is a one-off
+      // event best delivered immediately, not batched on the next 1-minute
+      // tick). Gated by the same admin toggle (Paramètres → Communication →
+      // Notifications push — Portail Parent → Sortie de l'élève) and the
+      // same tenant push config as every other parent alert.
+      try {
+        const checkedOutSids = appendedRows.filter(function(e){ return String(e.status||'').toUpperCase() === 'CHECKED_OUT'; }).map(function(e){ return e.sid; });
+        if (checkedOutSids.length) {
+          const prefsForCheckout = _getParentNotifPrefs_(getSaaSSettings_().data || {});
+          if (prefsForCheckout.checkoutEnabled) {
+            const pushBase = String(_getLocalPushSetting_(_PUSH_CFG_KEYS_.BASE_URL) || '').replace(/\/$/, '');
+            const pushToken = String(_getLocalPushSetting_(_PUSH_CFG_KEYS_.ADMIN_TOKEN) || '');
+            if (pushBase && pushToken) {
+              const linksMapForCheckout = _getParentLinksByStudentId_(ss);
+              const tzForCheckout = Session.getScriptTimeZone() || 'UTC';
+              const stampForCheckout = Utilities.formatDate(new Date(), tzForCheckout, 'HH:mm');
+              checkedOutSids.forEach(function(sid) {
+                const sidUpper = String(sid || '').trim().toUpperCase();
+                const parentIds = linksMapForCheckout[sidUpper];
+                if (!parentIds || !parentIds.length) return; // no parent linked — nothing to send
+                _sendParentTargetedPush_(
+                  pushBase, pushToken, parentIds,
+                  'Sortie enregistrée',
+                  (_quickStudentName_(ss, sidUpper) || 'Votre enfant') + ' a quitté l\'établissement à ' + stampForCheckout + '.',
+                  'parent-checkout-' + sidUpper + '-' + Utilities.formatDate(new Date(), tzForCheckout, 'yyyy-MM-dd-HHmm')
+                );
+              });
+            }
+          }
+        }
+      } catch (_checkoutPushErr) { /* checkout push failing must never block attendance recording itself */ }
+    }
+    // `processed` is kept for backward compatibility with any other caller
+    // that only reads the count; `results` is the new, reason-carrying detail
+    // the kiosk now reads to avoid mislabeling a non-duplicate failure.
+    return { success:true, processed:newRows.length, results:results };
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+// [F5] historyId filter added
+function getAttendanceForStudent_(params, auth) {
+  try {
+    const studentId = params && (params.studentId||params.id) ? (params.studentId||params.id) : null;
+    const historyId = params && params.historyId ? params.historyId : null;
+    if (studentId) {
+      const guard = ensureViewerCanAccessStudentScope_(studentId, auth);
+      if (!guard.success) return { success:false, error:guard.error };
+    }
+    const ss   = getSS_();
+    const sh   = ss.getSheetByName('attendance');
+    if (!sh || sh.getLastRow() < 2) return { success:true, data:[] };
+    const data = sh.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).trim());
+    const hUpper = h.map(x => x.toUpperCase());
+    const tz   = Session.getScriptTimeZone();
+    // Case-insensitive column lookup
+    const iSid = hUpper.findIndex(x => ['STUDENTID','STUDENTCODE','STUDENT_ID','STUDENT_CODE'].includes(x));
+    const iHid = hUpper.findIndex(x => ['HISTORYID','HISTORY_ID'].includes(x));
+    let rows   = data.slice(1);
+    if (studentId && iSid !== -1)
+      rows = rows.filter(r => String(r[iSid]).trim().toUpperCase() === String(studentId).trim().toUpperCase());
+    // [F5] Filter by historyId when provided
+    if (historyId && iHid !== -1)
+      rows = rows.filter(r => String(r[iHid]).trim() === String(historyId).trim());
+    return { success:true, data: rows.map(r => {
+      const obj = {};
+      h.forEach((k,i) => obj[k] = r[i] instanceof Date ? Utilities.formatDate(r[i],tz,'yyyy-MM-dd') : r[i]);
+      if (typeof obj.MetaJSON === 'string') { try { obj.MetaJSON = JSON.parse(obj.MetaJSON); } catch(e) {} }
+      return obj;
+    })};
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+function getAttendanceByDate_(params) {
+  try {
+    const date = params && params.date ? params.date : new Date().toISOString().slice(0,10);
+    const ss   = getSS_();
+    const sh   = ss.getSheetByName('attendance');
+    if (!sh || sh.getLastRow() < 2) return { success:true, data:[] };
+    const data = sh.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).trim());
+    const hUpper = h.map(x => x.toUpperCase());
+    const tz   = Session.getScriptTimeZone();
+    // Case-insensitive column lookup
+    const iDate = hUpper.findIndex(x => ['DATE','ATTENDANCE_DATE'].includes(x));
+    if (iDate === -1) return { success:true, data:[] };
+    return { success:true, data: data.slice(1)
+      .filter(r => {
+        const d = r[iDate] instanceof Date ? Utilities.formatDate(r[iDate],tz,'yyyy-MM-dd') : String(r[iDate]).slice(0,10);
+        return d === date;
+      })
+      .map(r => {
+        const obj = {};
+        h.forEach((k,i) => obj[k] = r[i] instanceof Date ? Utilities.formatDate(r[i],tz,'yyyy-MM-dd') : r[i]);
+        if (typeof obj.MetaJSON === 'string') { try { obj.MetaJSON = JSON.parse(obj.MetaJSON); } catch(e) {} }
+        return obj;
+      })
+    };
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+function getStudentAttendanceStats_(studentId, auth) {
+  try {
+    const result = getAttendanceForStudent_({ studentId }, auth);
+    if (!result.success) return { success:false, error:result.error };
+    let present=0, tardy=0, absent=0;
+    result.data.forEach(r => {
+      const rawStatus = (r && (r.Status !== undefined ? r.Status : r.STATUS));
+      const s = _normalizeAttendanceStatusToken_(rawStatus);
+      if (s === 'PRESENT') present++;
+      else if (s === 'LATE') tardy++;
+      else if (s === 'ABSENT') absent++;
+    });
+    const total = present + tardy + absent;
+    const attendancePct = total > 0 ? Math.round(((present + tardy) / total) * 100) : 0;
+    return { success:true, stats:{ present, tardy, absent, total, attendancePct } };
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+function getStudentAttendance_(studentId, auth) {
+  try {
+    let sid = studentId;
+    if (typeof studentId === 'object' && studentId !== null) {
+      sid = studentId.studentId || studentId.id || studentId;
+    }
+    if (!sid || sid === 'undefined' || sid === 'null') {
+      return { success: false, error: 'studentId manquant.' };
+    }
+    return getAttendanceForStudent_({ studentId: sid }, auth);
+  } catch(e) { return { success: false, error: e.message }; }
+}
+
+function getStudentInternalNotes_(studentId, auth) {
+  try {
+    let sid = studentId;
+    if (typeof studentId === 'object' && studentId !== null) {
+      sid = studentId.studentId || studentId.id || studentId;
+    }
+    if (!sid || sid === 'undefined' || sid === 'null') {
+      return { success: false, error: 'studentId manquant.' };
+    }
+    return getInternalNotes_({ studentId: sid }, auth);
+  } catch(e) { return { success: false, error: e.message }; }
+}
+
+function addStudentInternalNote_(payload, auth) {
+  if (!payload) return { success:false, error:'Payload manquant.' };
+  const p = typeof payload === 'string' ? { studentId: payload } : payload;
+  return addInternalNote_(p, auth);
+}
+
+function recordTransportAttendance_(data, auth) {
+  try {
+    const ss    = getSS_();
+    const sh    = ss.getSheetByName('attendance');
+    const viewer= getViewerInfo_(auth);
+    const recs  = Array.isArray(data) ? data : [data];
+    const histMap = _buildActiveHistoryMap(ss);
+    const newRows = recs.map(rec => {
+      const hist = histMap[String(rec.studentId||'').toUpperCase().trim()];
+      return [
+        'TRP-' + Utilities.getUuid().substring(0,8),
+        hist ? hist.historyId : '',
+        rec.studentId || '',
+        hist ? hist.level : '',
+        new Date(),
+        rec.status || 'PRESENT',
+        viewer.email || 'System',
+        JSON.stringify({ method:'TRANSPORT', route:rec.route||'', direction:rec.direction||'MATIN' })
+      ];
+    });
+    sh.getRange(sh.getLastRow()+1,1,newRows.length,newRows[0].length).setValues(newRows);
+    _invalidateAttendanceDerivedCaches_(ss);
+    recs.forEach(rec => {
+      writeAuditLog_('TRANSPORT_ATTENDANCE', rec.studentId, 'method:TRANSPORT,route:' + (rec.route||'') + ',direction:' + (rec.direction||''), 'p_attendance');
+    });
+    return { success:true, processed:recs.length };
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+function getAttendanceStats_(auth) {
+  try {
+    const ss = getSS_();
+    const sh = ss.getSheetByName('attendance');
+    if (!sh || sh.getLastRow() < 2) return { success:true, data:{ present:0, absent:0, late:0, total:0 }};
+    const data = sh.getDataRange().getValues();
+    const h    = data[0].map(x => String(x).toUpperCase().trim());
+    const iSt  = h.indexOf('STATUS');
+    let present=0, absent=0, late=0;
+    data.slice(1).forEach(r => {
+      const s = String(r[iSt]).toUpperCase();
+      if (s === 'PRESENT') present++;
+      else if (s === 'ABSENT') absent++;
+      else if (s === 'RETARD'||s === 'LATE') late++;
+    });
+    return { success:true, data:{ present, absent, late, total:present+absent+late }};
+  } catch(e) { return { success:false, error:e.message }; }
+}
+
+// ============================================================
+// FINANCE
+// ============================================================
+
+// [F6] historyId filter added; defaults to the active academic year for the
+// student when the caller does not pass an explicit historyId. This prevents
+// historical years from polluting current-year totals (audit fix #15).
+/**
+ * PERF: this is the single most-called Finance reader — it's hit for every
+ * "getPayments" (full list) AND "getStudentPayments" (per-student) request,
+ * including the post-payment reconciliation/"verify" step
+ * (_wasPaymentAlreadyRecorded_ on the frontend) and the background refresh
+ * that follows every successful save. Previously it re-read and re-parsed
+ * the ENTIRE Finance sheet with sh.getDataRange().getValues() on every
+ * single call — for a school with years of payment history this full read
+ * (and the per-row Date formatting below) is the dominant cost behind slow
+ * "saving..." / "verifying..." waits. Short-TTL caching here means the
+ * reconciliation call and the post-save refresh calls that immediately
+ * follow a payment (see recordNewPayment_) reuse one real sheet read instead
+ * of each paying for their own. An explicit `params.historyId` bypasses the

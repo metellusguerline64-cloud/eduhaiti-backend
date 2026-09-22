@@ -1,0 +1,18 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const root = new URL('../frontend-dist/', import.meta.url);
+const integration = fs.readFileSync(new URL('offline-domain-integration.js', root), 'utf8');
+const domain = fs.readFileSync(new URL('offline-domain.js', root), 'utf8');
+const html = fs.readFileSync(new URL('index.html', root), 'utf8');
+assert.match(html, /offline-domain\.js/);
+assert.match(html, /offline-domain-integration\.js/);
+assert.match(domain, /function getDomainHealth\(\)/);
+assert.match(domain, /getDomainHealth/);
+assert.match(integration, /window\.EDU_SYNC_STATE/);
+assert.match(integration, /eduhaiti:sync-state/);
+assert.match(integration, /LOCAL/);
+assert.match(integration, /EDGE \/ CLOUD/);
+assert.match(integration, /getDomainHealth/);
+assert.match(integration, /État des données/);
+assert.match(integration, /ACTION_DOMAIN/);
+console.log('PWA domain UI integration test: PASS');
