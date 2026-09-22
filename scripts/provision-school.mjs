@@ -18,6 +18,8 @@ const binding = `DB_${orgId.replace(/[^A-Z0-9]+/g, "_")}`;
 const apply = args.has("--apply");
 const accountId = String(process.env.CLOUDFLARE_ACCOUNT_ID || "").trim();
 const apiToken = String(process.env.CLOUDFLARE_API_TOKEN || "").trim();
+const zoneId = String(process.env.CLOUDFLARE_ZONE_ID || "").trim();
+const pagesTarget = String(process.env.PAGES_TARGET_HOST || "eduflow-01k.pages.dev").trim();
 const adminEmail = String(process.env.PROVISION_ADMIN_EMAIL || "").trim().toLowerCase();
 const adminPasswordHash = String(process.env.PROVISION_ADMIN_PASSWORD_HASH || "").trim().toLowerCase();
 
@@ -30,6 +32,7 @@ if (!/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/.test(subdomain)) fail("--subdomain
 if (!/^[A-Z][A-Z0-9_]{2,31}$/.test(orgId)) fail("--org-id must contain 3-32 uppercase letters, digits, or underscores.");
 if (binding === "DB_MASTER_DB" || binding === "DB_DB_MT1967") fail("reserved binding name.");
 if (apply && (!accountId || !apiToken)) fail("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required with --apply.");
+if (apply && !zoneId) fail("CLOUDFLARE_ZONE_ID (the eduflow.win zone id) is required with --apply, to create the school's DNS record.");
 if (apply && (!adminEmail || !/^[a-f0-9]{64}$/.test(adminPasswordHash))) fail("PROVISION_ADMIN_EMAIL and a SHA-256 PROVISION_ADMIN_PASSWORD_HASH are required with --apply.");
 
 const run = (command, commandArgs, { allowDuplicateColumn = false } = {}) => {
@@ -93,12 +96,39 @@ if (tenants.includes(`${subdomain}:`)) fail(`tenant ${subdomain} already exists.
 tenants = tenants.replace("  // SCHOOL_TENANTS_END", `  ${subdomain}: { orgId: "${orgId}", dbBinding: "${binding}" },\n  // SCHOOL_TENANTS_END`);
 await write(tenantsPath, tenants);
 
+const schoolDomain = `${subdomain}.eduflow.win`;
+const cfHeaders = { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" };
+
 const pagesResponse = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/pages/projects/eduflow/domains`, {
   method: "POST",
-  headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
-  body: JSON.stringify({ name: `${subdomain}.eduflow.win` }),
+  headers: cfHeaders,
+  body: JSON.stringify({ name: schoolDomain }),
 });
-if (!pagesResponse.ok) fail(`Pages custom domain failed: ${pagesResponse.status} ${await pagesResponse.text()}`);
+const pagesBody = await pagesResponse.json().catch(() => null);
+// Code 8000018 = "already added this custom domain" — safe to ignore so the
+// script is re-runnable (e.g. after the DNS step below failed previously).
+const alreadyRegistered = pagesBody?.errors?.some((e) => e.code === 8000018);
+if (!pagesResponse.ok && !alreadyRegistered) fail(`Pages custom domain failed: ${pagesResponse.status} ${JSON.stringify(pagesBody)}`);
+
+// Registering the domain on the Pages project does NOT by itself create the
+// DNS record — that's a separate, required step. Without it the domain sits
+// registered but unresolvable (this is exactly what happened with test1).
+const existingRecords = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?name=${schoolDomain}`, {
+  headers: cfHeaders,
+}).then((r) => r.json());
+if (!existingRecords?.success) fail(`Could not check existing DNS records: ${JSON.stringify(existingRecords)}`);
+
+if (existingRecords.result.length === 0) {
+  const dnsResponse = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`, {
+    method: "POST",
+    headers: cfHeaders,
+    body: JSON.stringify({ type: "CNAME", name: schoolDomain, content: pagesTarget, proxied: true, ttl: 1 }),
+  });
+  const dnsBody = await dnsResponse.json().catch(() => null);
+  if (!dnsResponse.ok) fail(`DNS record creation failed: ${dnsResponse.status} ${JSON.stringify(dnsBody)}`);
+} else {
+  console.log(`DNS record for ${schoolDomain} already exists, skipping.`);
+}
 
 run("npx", ["wrangler", "deploy"]);
 console.log(`Provisioned ${subdomain}.eduflow.win with isolated database ${databaseName}.`);
