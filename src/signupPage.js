@@ -78,6 +78,14 @@ export const SIGNUP_PAGE_HTML = `<!DOCTYPE html>
     display: block; text-align: center; margin-top: 16px; background: var(--accent); color: #fff;
     text-decoration: none; padding: 12px; border-radius: 9px; font-weight: 700;
   }
+  .logoRow { display: flex; align-items: center; gap: 12px; }
+  .logoPreview {
+    width: 56px; height: 56px; border-radius: 12px; border: 1px dashed var(--border);
+    background: var(--bg); display: flex; align-items: center; justify-content: center;
+    overflow: hidden; flex-shrink: 0; color: #8a8375; font-size: 0.7rem; text-align: center;
+  }
+  .logoPreview img { width: 100%; height: 100%; object-fit: cover; }
+  select:disabled { color: #8a8375; background: var(--bg); }
 </style>
 </head>
 <body>
@@ -116,6 +124,34 @@ export const SIGNUP_PAGE_HTML = `<!DOCTYPE html>
         <input type="tel" name="phone" placeholder="+509 ..." required />
         <div class="hint">Ce numéro servira uniquement pour la première connexion. Vous créerez ensuite votre PIN personnel.</div>
       </div>
+      <div>
+        <label>Département</label>
+        <select name="department" id="departmentSelect" required>
+          <option value="" disabled selected>Choisir un département</option>
+        </select>
+      </div>
+      <div>
+        <label>Ville / Commune</label>
+        <select name="town" id="townSelect" required disabled>
+          <option value="" disabled selected>Choisir d'abord un département</option>
+        </select>
+      </div>
+      <div>
+        <label>Mode Compagnie (identifiants automatiques)</label>
+        <select name="companyMode" id="companyModeSelect">
+          <option value="OFF" selected>Désactivé — je saisis les identifiants moi-même</option>
+          <option value="ON">Activé — identifiants générés et verrouillés automatiquement</option>
+        </select>
+        <div class="hint">En mode Compagnie, les identifiants (élèves, membres, etc.) sont générés automatiquement avec le préfixe de votre organisation et ne peuvent plus être modifiés à la main. Vous pourrez changer ce réglage plus tard dans les paramètres.</div>
+      </div>
+      <div>
+        <label>Logo (optionnel)</label>
+        <div class="logoRow">
+          <div class="logoPreview" id="logoPreview">Aucun logo</div>
+          <input type="file" name="logo" id="logoInput" accept="image/png,image/jpeg,image/webp" />
+        </div>
+        <div class="hint" id="logoHint">PNG, JPEG ou WebP — 300 Ko maximum. Utilisé comme icône de l'application.</div>
+      </div>
       <button type="submit" class="submit">Créer le compte</button>
 
       <div class="result" id="signupResult">
@@ -149,6 +185,84 @@ export const SIGNUP_PAGE_HTML = `<!DOCTYPE html>
 <script>
 (function () {
   var API_BASE = location.origin;
+
+  // Kept in step with src/lib/haitiLocalities.js (server-side validation
+  // uses that file; this is the browser-side copy for the dropdowns —
+  // update both together if a commune is added/corrected).
+  var TOWNS_BY_DEPARTMENT = {
+    "Artibonite": ["Gonaïves","Ennery","L'Estère","Gros-Morne","Anse-Rouge","Terre-Neuve","Dessalines","Grande-Saline","Petite-Rivière-de-l'Artibonite","Verrettes","La Chapelle","Saint-Marc","Saint-Michel-de-l'Attalaye","Marmelade","Desdunes"],
+    "Centre": ["Hinche","Maïssade","Thomassique","Cerca-Carvajal","Mirebalais","Saut-d'Eau","Boucan-Carré","Lascahobas","Belladère","Baptiste","Savanette","Thomonde","Cerca-la-Source"],
+    "Grand'Anse": ["Jérémie","Abricots","Bonbon","Corail","Moron","Pestel","Beaumont","Anse-d'Hainault","Dame-Marie","Les Irois","Chambellan","Roseaux"],
+    "Nippes": ["Miragoâne","Petite-Rivière-de-Nippes","Petit-Trou-de-Nippes","Anse-à-Veau","L'Asile","Fonds-des-Nègres","Plaisance-du-Sud","Baradères","Paillant"],
+    "Nord": ["Cap-Haïtien","Quartier-Morin","Limonade","Plaine-du-Nord","Milot","Acul-du-Nord","Grande-Rivière-du-Nord","Bahon","La Victoire","Saint-Raphaël","Dondon","Pignon","Ranquitte","Borgne","Port-Margot","Limbé","Bas-Limbé","Plaisance","Pilate"],
+    "Nord-Est": ["Fort-Liberté","Ferrier","Perches","Ouanaminthe","Capotille","Mont-Organisé","Trou-du-Nord","Terrier-Rouge","Caracol","Sainte-Suzanne","Vallières","Carice","Mombin-Crochu"],
+    "Nord-Ouest": ["Port-de-Paix","La Tortue","Bassin-Bleu","Chansolme","Saint-Louis-du-Nord","Anse-à-Foleur","Môle-Saint-Nicolas","Bombardopolis","Baie-de-Henne","Jean-Rabel"],
+    "Ouest": ["Port-au-Prince","Delmas","Pétion-Ville","Carrefour","Tabarre","Cité Soleil","Kenscoff","Gressier","Léogâne","Grand-Goâve","Petit-Goâve","Croix-des-Bouquets","Cornillon","Thomazeau","Ganthier","Fonds-Verrettes","Arcahaie","Cabaret","Anse-à-Galets","Pointe-à-Raquette"],
+    "Sud": ["Les Cayes","Torbeck","Île-à-Vache","Camp-Perrin","Maniche","Chantal","Cavaillon","Saint-Louis-du-Sud","Aquin","Saint-Jean-du-Sud","Port-à-Piment","Roche-à-Bateau","Coteaux","Port-Salut","Arniquet","Chardonnières","Les Anglais","Tiburon"],
+    "Sud-Est": ["Jacmel","Cayes-Jacmel","Marigot","Bainet","Côtes-de-Fer","Belle-Anse","Thiotte","Grand-Gosier","Anse-à-Pitres","La Vallée"]
+  };
+  var DEPARTMENTS = Object.keys(TOWNS_BY_DEPARTMENT);
+
+  // ---- Department / town cascading dropdowns ----
+  var departmentSelect = document.getElementById("departmentSelect");
+  var townSelect = document.getElementById("townSelect");
+  DEPARTMENTS.forEach(function (dep) {
+    var opt = document.createElement("option");
+    opt.value = dep; opt.textContent = dep;
+    departmentSelect.appendChild(opt);
+  });
+  departmentSelect.addEventListener("change", function () {
+    var towns = TOWNS_BY_DEPARTMENT[departmentSelect.value] || [];
+    townSelect.innerHTML = "";
+    var placeholder = document.createElement("option");
+    placeholder.value = ""; placeholder.disabled = true; placeholder.selected = true;
+    placeholder.textContent = towns.length ? "Choisir une ville" : "Aucune ville disponible";
+    townSelect.appendChild(placeholder);
+    towns.forEach(function (town) {
+      var opt = document.createElement("option");
+      opt.value = town; opt.textContent = town;
+      townSelect.appendChild(opt);
+    });
+    townSelect.disabled = towns.length === 0;
+  });
+
+  // ---- Logo upload: convert to a base64 data URL client-side, preview it ----
+  var MAX_LOGO_BYTES = 300 * 1024;
+  var logoInput = document.getElementById("logoInput");
+  var logoPreview = document.getElementById("logoPreview");
+  var logoHint = document.getElementById("logoHint");
+  var logoDataUrl = null;
+  logoInput.addEventListener("change", function () {
+    var file = logoInput.files && logoInput.files[0];
+    logoDataUrl = null;
+    if (!file) {
+      logoPreview.innerHTML = "Aucun logo";
+      logoHint.textContent = "PNG, JPEG ou WebP — 300 Ko maximum. Utilisé comme icône de l'application.";
+      logoHint.className = "hint";
+      return;
+    }
+    if (file.size > MAX_LOGO_BYTES) {
+      logoHint.textContent = "Fichier trop volumineux (300 Ko maximum). Choisissez une image plus légère.";
+      logoHint.className = "hint err";
+      logoInput.value = "";
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      logoDataUrl = reader.result;
+      logoPreview.innerHTML = "";
+      var img = document.createElement("img");
+      img.src = logoDataUrl;
+      logoPreview.appendChild(img);
+      logoHint.textContent = "Logo prêt — il sera utilisé comme icône de l'application.";
+      logoHint.className = "hint ok";
+    };
+    reader.onerror = function () {
+      logoHint.textContent = "Impossible de lire ce fichier. Réessayez.";
+      logoHint.className = "hint err";
+    };
+    reader.readAsDataURL(file);
+  });
 
   function callApi(action, data) {
     return fetch(API_BASE + "/?action=" + encodeURIComponent(action), {
@@ -203,7 +317,10 @@ export const SIGNUP_PAGE_HTML = `<!DOCTYPE html>
       businessName: form.businessName.value.trim(),
       email: form.email.value.trim(),
       phone: form.phone.value.trim(),
-      phone: form.phone.value.trim(),
+      department: form.department.value,
+      town: form.town.value,
+      logoDataUrl: logoDataUrl,
+      companyMode: form.companyMode.value === "ON",
     }).then(function (res) {
       submitBtn.disabled = false; submitBtn.textContent = "Créer le compte";
       var d = res && res.data ? res.data : res;

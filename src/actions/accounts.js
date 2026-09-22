@@ -19,9 +19,20 @@
 
 import { hashPin } from "../lib/hash.js";
 import { generateUniqueBusinessId, generateUniqueSubdomain, generateRegToken, slugify } from "../lib/accounts.js";
+import { isValidDepartment, isValidTown } from "../lib/haitiLocalities.js";
 
 const TENANT_APP_DOMAIN = "eduflow.win";
 const ORG_TYPES = new Set(["BUSINESS", "CHURCH", "SCHOOL", "HOTEL", "CARNET_EPARGNE"]);
+// Keep this in step with the signup form's file-size guard (src/signupPage.js) —
+// a data: URI runs ~33% larger than the raw file, so 400KB of base64 text
+// caps the original image around 300KB, generous for a PWA icon source.
+const MAX_LOGO_DATA_URL_LENGTH = 400_000;
+function isValidLogoDataUrl(value) {
+  if (!value) return true; // logo is optional
+  return typeof value === "string"
+    && /^data:image\/(png|jpeg|jpg|webp);base64,/.test(value)
+    && value.length <= MAX_LOGO_DATA_URL_LENGTH;
+}
 function normalizePhone(value) {
   return String(value || "").replace(/\D/g, "");
 }
@@ -38,11 +49,24 @@ export async function registerAccount(data, _auth, env) {
   const businessName = String(data.businessName || "").trim();
   const email = String(data.email || "").trim().toLowerCase();
   const phone = normalizePhone(data.phone);
+  const department = String(data.department || "").trim();
+  const town = String(data.town || "").trim();
+  const logoDataUrl = data.logoDataUrl ? String(data.logoDataUrl) : null;
+  // Company Mode: whether this org's IDs (student/member codes) should be
+  // generated automatically and locked (SYSTEM_ID_MODE=COMPANY, see
+  // src/lib/orgBilling.js's mapOrgRowToMasterData and school.js's legacy
+  // getIdsGenerationMode_) versus entered manually. Chosen at signup here,
+  // changeable later from that org's own settings screen — same
+  // design_json.general.companyIdMode key that screen already writes to.
+  const companyMode = data.companyMode === true || data.companyMode === "true" || data.companyMode === "ON";
 
   if (!businessName) return { success: false, message: "Le nom de l'organisation est requis." };
   if (!ORG_TYPES.has(orgType)) return { success: false, message: "Type d'organisation invalide." };
   if (!email || !email.includes("@")) return { success: false, message: "Email invalide." };
   if (phone.length < 7 || phone.length > 15) return { success: false, message: "Numéro de téléphone invalide." };
+  if (!isValidDepartment(department)) return { success: false, message: "Département invalide." };
+  if (!isValidTown(department, town)) return { success: false, message: "Ville invalide pour ce département." };
+  if (!isValidLogoDataUrl(logoDataUrl)) return { success: false, message: "Logo invalide (PNG/JPEG/WebP, 300 Ko max)." };
 
   const existing = await env.MASTER_DB.prepare(
     `SELECT 1 FROM orgs WHERE LOWER(email) = ? AND deleted_at IS NULL`
@@ -56,12 +80,13 @@ export async function registerAccount(data, _auth, env) {
   const subdomain = await generateUniqueSubdomain(env.MASTER_DB, businessName);
   const regToken = generateRegToken();
   const pinHash = await hashPin(phone);
+  const designJson = JSON.stringify({ general: { companyIdMode: companyMode ? "ON" : "OFF" } });
 
   await env.MASTER_DB.prepare(
-    `INSERT INTO orgs (id, business_id, pin_hash, org_type, business_name, email, phone, subdomain, reg_token)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO orgs (id, business_id, pin_hash, org_type, business_name, email, phone, subdomain, reg_token, department, town, logo_data_url, design_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(id, businessId, pinHash, orgType, businessName, email, phone, subdomain, regToken)
+    .bind(id, businessId, pinHash, orgType, businessName, email, phone, subdomain, regToken, department, town, logoDataUrl, designJson)
     .run();
 
   return {
@@ -69,6 +94,7 @@ export async function registerAccount(data, _auth, env) {
     businessId,
     subdomain,
     provisioningStatus: "PENDING_PROVISIONING",
+    companyMode,
     regToken,
     tenantAppUrl: tenantAppUrl(subdomain),
   };
@@ -104,6 +130,9 @@ export async function fetchConfig(data, _auth, env) {
     businessId: row.business_id,
     businessName: row.business_name,
     orgType: row.org_type,
+    department: row.department,
+    town: row.town,
+    logoDataUrl: row.logo_data_url,
     designJson: row.design_json,
     rulesJson: row.rules_json,
     subdomain: row.subdomain,
