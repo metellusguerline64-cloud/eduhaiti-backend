@@ -59,6 +59,10 @@ crons = ["*/10 * * * *", "17 2 * * *"]
 # for school signup.
 [vars]
 MASTER_AUTH_ID = "REPLACE_WITH_GENERATED_IDS_SPREADSHEET_ID"
+# Must match the Pages project's default host (see scripts/provision-school.mjs's
+# PAGES_TARGET_HOST) — used as the fallback icon source for any org that
+# hasn't uploaded a logo (src/lib/tenantBranding.js).
+PAGES_TARGET_HOST = "eduflow-01k.pages.dev"
 
 # Secrets (never put these in [vars] / source control):
 #   npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_EMAIL
@@ -77,6 +81,15 @@ MASTER_AUTH_ID = "REPLACE_WITH_GENERATED_IDS_SPREADSHEET_ID"
 # BADGE_INGEST_KEY constant. Rotate by setting a new secret + updating GAS
 # in the same change.
 
+# Public landing/registration URL — the one to hand directors: just
+# "eduflow.win" (no subdomain, no path). Separate from the "*.eduflow.win/..."
+# wildcard above (Cloudflare treats a bare "eduflow.win/*" pattern as the
+# apex only, not every subdomain) — this is what makes GET / on the bare
+# domain reach the signup page instead of 404ing (src/index.js's "/" alias).
+[[routes]]
+pattern = "eduflow.win/*"
+zone_name = "eduflow.win"
+
 # Wildcard route: every school's subdomain hits this one Worker, which
 # then picks the right D1 database via the Host header (see lib/tenants.js).
 [[routes]]
@@ -85,6 +98,23 @@ zone_name = "eduflow.win"
 
 [[routes]]
 pattern = "*.eduflow.win/api"
+zone_name = "eduflow.win"
+
+# Per-school PWA branding (EDGE-0093, see src/lib/tenantBranding.js) —
+# Workers routes always win over Pages for a matched path on the same
+# zone, so these three intercept the static frontend-dist/manifest.json
+# and default icons with per-tenant ones read from MASTER_DB, with zero
+# change needed to the Pages deployment or index.html.
+[[routes]]
+pattern = "*.eduflow.win/manifest.json"
+zone_name = "eduflow.win"
+
+[[routes]]
+pattern = "*.eduflow.win/icons/icon-192.png"
+zone_name = "eduflow.win"
+
+[[routes]]
+pattern = "*.eduflow.win/icons/icon-512.png"
 zone_name = "eduflow.win"
 
 # Optional Worker-native R2 storage for media uploads.

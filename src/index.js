@@ -12,6 +12,7 @@ import { resolveTenantFromRequest, listTenants, scopedEnvForTenant } from "./lib
 import { SIGNUP_PAGE_HTML } from "./signupPage.js";
 import { runDatabaseBackup } from "./actions/backup.js";
 import { handleMonCashReturn } from "./actions/moncash.js";
+import { getTenantBranding, buildManifestResponse, buildIconResponse } from "./lib/tenantBranding.js";
 
 // Actions that run BEFORE any school/tenant is known — the account-
 // creation interface itself. These read/write env.MASTER_DB (the shared
@@ -53,11 +54,36 @@ export default {
       return new Response(request.method === "HEAD" ? null : object.body, { headers });
     }
 
+    // Per-school PWA branding (EDGE-0093): manifest.json's name/short_name
+    // and both icon sizes come from this subdomain's own org row
+    // (business_name, logo_data_url) instead of the one shared default
+    // every school used to get. See src/lib/tenantBranding.js for the
+    // full rationale and the wrangler.toml routes that make this Worker
+    // (rather than the Pages deployment) answer these three paths.
+    if (
+      request.method === "GET" &&
+      (url.pathname === "/manifest.json" || url.pathname === "/icons/icon-192.png" || url.pathname === "/icons/icon-512.png")
+    ) {
+      const tenant = resolveTenantFromRequest(request);
+      const row = tenant ? await getTenantBranding(env, tenant) : null;
+      if (url.pathname === "/manifest.json") return buildManifestResponse(row, CORS_HEADERS);
+      const iconFile = url.pathname.split("/").pop();
+      const pagesHost = env.PAGES_TARGET_HOST || "eduflow-01k.pages.dev";
+      return buildIconResponse(row, iconFile, pagesHost, CORS_HEADERS);
+    }
+
     // Serve the account-creation interface itself. This is a temporary
     // Worker-served static page (Section 2 of the blueprint calls for
     // Cloudflare Pages eventually) — fine for now since it's one file with
     // no build step, same "single-file HTML/JS" convention as school.html.
-    if (request.method === "GET" && (url.pathname === "/signup" || url.pathname === "/inscription" || url.pathname === "/api/signup" || url.pathname === "/api/inscription")) {
+    if (
+      request.method === "GET" &&
+      (url.pathname === "/" ||
+        url.pathname === "/signup" ||
+        url.pathname === "/inscription" ||
+        url.pathname === "/api/signup" ||
+        url.pathname === "/api/inscription")
+    ) {
       return new Response(SIGNUP_PAGE_HTML, {
         headers: { "Content-Type": "text/html; charset=utf-8", ...CORS_HEADERS },
       });
