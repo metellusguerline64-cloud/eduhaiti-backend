@@ -39,11 +39,15 @@ const pending = (payload[0]?.results || []);
 console.log(`Found ${pending.length} pending organization(s).`);
 
 for (const org of pending) {
+  console.log(`DEBUG raw org row: ${JSON.stringify(org)}`);
   const subdomain = String(org.subdomain || "").trim();
   const orgId = String(org.business_id || "").trim();
   const previousEmail = process.env.PROVISION_ADMIN_EMAIL;
   const previousHash = process.env.PROVISION_ADMIN_PASSWORD_HASH;
-  if (!subdomain || !orgId) continue;
+  if (!subdomain || !orgId) {
+    console.warn(`Skipping org: missing subdomain ("${subdomain}") or business_id ("${orgId}").`);
+    continue;
+  }
   try {
     process.env.PROVISION_ADMIN_EMAIL = String(org.email || "").trim().toLowerCase();
     process.env.PROVISION_ADMIN_PASSWORD_HASH = String(org.pin_hash || "").trim().toLowerCase();
