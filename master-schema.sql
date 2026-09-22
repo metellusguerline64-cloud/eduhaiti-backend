@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS orgs (
   expiration_date TEXT,                           -- subscription expiry; NULL means no explicit expiry
   -- SaaS settings identity fields (EDGE-0091) — mirrors the remaining
   -- getSaaSSettings_ Register columns not already covered above.
+  -- Signup form location + branding (EDGE-0092) — département/commune the
+  -- org selected, and its PWA icon as a data: URI (see migration 0003's
+  -- header comment for why data: URI rather than an R2 key for now).
+  department           TEXT,
+  town                 TEXT,
+  logo_data_url         TEXT,
   address             TEXT,
   payment_type        TEXT,
   picture_drive_link   TEXT,
