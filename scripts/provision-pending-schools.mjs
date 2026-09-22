@@ -31,11 +31,30 @@ async function runSql(statement, json = false) {
 }
 
 const raw = await runSql("SELECT business_id, subdomain, email, pin_hash, provisioning_status FROM orgs WHERE deleted_at IS NULL AND provisioning_status IN ('PENDING_PROVISIONING','PROVISIONING') ORDER BY created_at", true);
+console.log(`DEBUG raw wrangler stdout: ${raw}`);
+
 const jsonStart = raw.indexOf("[");
 const jsonEnd = raw.lastIndexOf("]");
 if (jsonStart < 0 || jsonEnd < jsonStart) throw new Error("Wrangler did not return JSON output.");
 const payload = JSON.parse(raw.slice(jsonStart, jsonEnd + 1));
-const pending = (payload[0]?.results || []);
+
+// Wrangler's --json output can contain multiple top-level blocks (e.g. a
+// results block and a separate stats/meta block). The old code assumed the
+// real rows always live at payload[0].results, but on this wrangler version
+// that position can instead hold the query-stats object (queries executed,
+// rows read/written, database size) with no business_id/subdomain — which
+// was silently treated as a single "pending org" with blank fields.
+// Fix: scan every block's .results array and keep only entries that look
+// like actual org rows (exclude anything shaped like the stats object).
+let pending = [];
+for (const block of payload) {
+  if (Array.isArray(block?.results)) {
+    pending = pending.concat(
+      block.results.filter((r) => r && typeof r === "object" && !("Total queries executed" in r))
+    );
+  }
+}
+
 console.log(`Found ${pending.length} pending organization(s).`);
 
 for (const org of pending) {
