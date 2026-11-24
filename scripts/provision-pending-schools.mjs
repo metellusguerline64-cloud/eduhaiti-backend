@@ -49,6 +49,26 @@ function sql(value) {
   return `'${String(value || "").replaceAll("'", "''")}'`;
 }
 
+async function readRequestedOrgId() {
+  const inline = process.argv.find((value) => value.startsWith("--org-id="));
+  const index = process.argv.indexOf("--org-id");
+  const cliValue = inline ? inline.slice("--org-id=".length) : index >= 0 ? process.argv[index + 1] : "";
+  let event = {};
+  if (!cliValue && process.env.GITHUB_EVENT_PATH) {
+    try {
+      event = JSON.parse(await fs.readFile(process.env.GITHUB_EVENT_PATH, "utf8"));
+    } catch (error) {
+      throw new Error(`Unable to read GitHub event payload: ${error.message}`);
+    }
+  }
+  const value = cliValue || process.env.PROVISION_ORG_ID || event.client_payload?.orgId || event.inputs?.org_id || "";
+  const orgId = String(value).trim().toUpperCase();
+  if (orgId && !/^[A-Z][A-Z0-9_]{2,31}$/.test(orgId)) {
+    throw new Error("Requested --org-id is not a valid organization identifier.");
+  }
+  return orgId;
+}
+
 async function runSql(statement, json = false) {
   // D1's --file path uses the import endpoint and returns only an execution
   // summary, not SELECT rows. Read queries that need JSON results must use
@@ -66,13 +86,17 @@ async function runSql(statement, json = false) {
   }
 }
 
-const raw = await runSql("SELECT business_id, subdomain, email, phone, pin_hash, provisioning_status FROM orgs WHERE deleted_at IS NULL AND (provisioning_status IN ('PENDING_PROVISIONING','PROVISIONING') OR (provisioning_status='PROVISIONING_FAILED' AND updated_at <= STRFTIME('%Y-%m-%dT%H:%M:%fZ','now','-5 minutes'))) ORDER BY created_at", true);
+const targetOrgId = await readRequestedOrgId();
+const targetFilter = targetOrgId ? ` AND business_id=${sql(targetOrgId)}` : "";
+const failedRetryFilter = targetOrgId ? "1=1" : "updated_at <= STRFTIME('%Y-%m-%dT%H:%M:%fZ','now','-5 minutes')";
+const queueSql = `SELECT business_id, subdomain, email, phone, pin_hash, provisioning_status FROM orgs WHERE deleted_at IS NULL AND (provisioning_status IN ('PENDING_PROVISIONING','PROVISIONING') OR (provisioning_status='PROVISIONING_FAILED' AND ${failedRetryFilter}))${targetFilter} ORDER BY created_at LIMIT 1`;
+const raw = await runSql(queueSql, true);
 const jsonStart = raw.indexOf("[");
 const jsonEnd = raw.lastIndexOf("]");
 if (jsonStart < 0 || jsonEnd < jsonStart) throw new Error("Wrangler did not return JSON output.");
 const payload = JSON.parse(raw.slice(jsonStart, jsonEnd + 1));
 const pending = (payload[0]?.results || []);
-log("queue_scanned", { pendingCount: pending.length, orgIds: pending.map((org) => String(org.business_id || "").trim()) });
+log("queue_scanned", { scope: targetOrgId ? "requested_organization" : "one_oldest_pending_organization", targetOrgId: targetOrgId || null, pendingCount: pending.length, orgIds: pending.map((org) => String(org.business_id || "").trim()) });
 const prepared = [];
 const failed = [];
 
