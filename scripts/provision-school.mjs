@@ -21,7 +21,8 @@ for (let i = 2; i < process.argv.length; i += 1) {
   }
 }
 
-const subdomain = String(args.get("--subdomain") || "").trim().toLowerCase();
+const rawSubdomainArgument = String(args.get("--subdomain") || "");
+const subdomain = rawSubdomainArgument.trim().toLowerCase();
 const orgId = String(args.get("--org-id") || "").trim().toUpperCase();
 const databaseName = `eduhaiti-db-${subdomain}`;
 const binding = `DB_${orgId.replace(/[^A-Z0-9]+/g, "_")}`;
@@ -50,6 +51,19 @@ function fail(message) {
   console.error(`Provisioning error: ${message}`);
   process.exit(1);
 }
+
+log("inputs_received", {
+  rawSubdomain: rawSubdomainArgument,
+  rawSubdomainJson: JSON.stringify(rawSubdomainArgument),
+  rawSubdomainLength: rawSubdomainArgument.length,
+  rawSubdomainCodePoints: Array.from(rawSubdomainArgument, (character) => character.codePointAt(0).toString(16)),
+  normalizedSubdomain: subdomain,
+  normalizedSubdomainJson: JSON.stringify(subdomain),
+  normalizedSubdomainLength: subdomain.length,
+  normalizedSubdomainCodePoints: Array.from(subdomain, (character) => character.codePointAt(0).toString(16)),
+  orgId,
+  flags: { apply, deferDeploy },
+});
 
 if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(subdomain)) fail(`--subdomain must be a DNS-safe label; received ${JSON.stringify(subdomain)}.`);
 if (!/^[A-Z][A-Z0-9_]{2,31}$/.test(orgId)) fail("--org-id must contain 3-32 uppercase letters, digits, or underscores.");
