@@ -9,11 +9,19 @@ function log(step, details = {}) {
 }
 
 function run(command, args) {
-  const executable = process.platform === "win32" && command === "npx" ? "npx.cmd" : command;
-  const result = spawnSync(executable, args, {
+  // Avoid npx.cmd + shell=true on Windows: PowerShell/cmd re-splits D1 SQL
+  // arguments at spaces and punctuation (e.g. SELECT ... FROM ...), making
+  // Wrangler report the SQL words as unknown CLI arguments. Invoke the local
+  // Wrangler JavaScript entry point through the current Node executable so
+  // each argument, especially --command SQL, stays intact on every platform.
+  const executable = command === "npx" ? process.execPath : command;
+  const commandArgs = command === "npx"
+    ? [path.resolve("node_modules/wrangler/bin/wrangler.js"), ...args.slice(1)]
+    : args;
+  const result = spawnSync(executable, commandArgs, {
     encoding: "utf8",
     env: process.env,
-    shell: process.platform === "win32",
+    shell: false,
   });
   if (result.status !== 0) {
     const combinedOutput = [result.stdout, result.stderr]
@@ -25,24 +33,6 @@ function run(command, args) {
     throw new Error(`${command} exited ${result.status ?? "unknown"}${result.error ? ` (${result.error.message})` : ""}${combinedOutput ? `\n${combinedOutput}` : ""}`);
   }
   return result.stdout || "";
-}
-
-function persistTenantRouting() {
-  if (process.env.GITHUB_ACTIONS !== "true") {
-    throw new Error("--persist-routing is reserved for the configured GitHub Actions provisioner.");
-  }
-  run("git", ["config", "user.name", "github-actions[bot]"]);
-  run("git", ["config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"]);
-  run("git", ["add", "--", "wrangler.toml", "src/lib/tenants.js"]);
-  const check = spawnSync("git", ["diff", "--cached", "--quiet"], { encoding: "utf8", env: process.env });
-  if (check.status === 0) {
-    console.log("Tenant routing is already committed; no source update needed.");
-    return;
-  }
-  if (check.status !== 1) throw new Error(check.stderr || check.error?.message || "Unable to inspect staged tenant routing changes.");
-  run("git", ["commit", "-m", "chore: register EduHaiti tenant routes"]);
-  run("git", ["push"]);
-  console.log("Tenant routing committed before the Worker deploy.");
 }
 
 function sql(value) {
@@ -87,6 +77,7 @@ async function runSql(statement, json = false) {
 }
 
 const targetOrgId = await readRequestedOrgId();
+const prepareOnly = process.argv.includes("--prepare-only");
 const targetFilter = targetOrgId ? ` AND business_id=${sql(targetOrgId)}` : "";
 const failedRetryFilter = targetOrgId ? "1=1" : "updated_at <= STRFTIME('%Y-%m-%dT%H:%M:%fZ','now','-5 minutes')";
 const queueSql = `SELECT business_id, subdomain, email, phone, pin_hash, provisioning_status, provisioning_progress, provisioning_step FROM orgs WHERE deleted_at IS NULL AND (provisioning_status IN ('PENDING_PROVISIONING','PROVISIONING') OR (provisioning_status='PROVISIONING_FAILED' AND ${failedRetryFilter}))${targetFilter} ORDER BY created_at LIMIT 1`;
@@ -131,24 +122,17 @@ for (const org of pending) {
     // writing to users.phone.
     process.env.PROVISION_ADMIN_PHONE = String(org.phone || "").trim();
     const previousProgress = Math.max(0, Math.min(100, Number(org.provisioning_progress) || 0));
-    // A failure at 95% is the final shared Worker publish, after this school's
-    // database and tenant route have already been prepared. Retry only that
-    // publish; rerunning school creation can recreate resources and falsely
-    // restart the visible progress bar.
-    if (previousProgress >= 95) {
-      await runSql(`UPDATE orgs SET provisioning_status='PROVISIONING', provisioning_progress=MAX(COALESCE(provisioning_progress,0),95), provisioning_step='Nouvelle tentative de publication du Worker partagé', provisioning_error=NULL, updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(orgId)}`);
-      prepared.push({ orgId, subdomain });
-      log("organization_publish_retry", { orgId, subdomain, preservedProgress: previousProgress, skippedSchoolPreparation: true });
-      continue;
-    }
-    // Preserve progress from an interrupted attempt. provision-school.mjs
-    // records the next confirmed step; this runner must never reset it to 5%.
+    // Re-run the idempotent school preparation even for older 95% records.
+    // This upgrades them into the registry used by the Cloudflare coordinator;
+    // it does not publish the shared Worker or change any other tenant.
+    // Preserve progress from an interrupted attempt; provision-school.mjs
+    // records the next confirmed step and this runner never resets it to 5%.
     await runSql(`UPDATE orgs SET provisioning_status='PROVISIONING', provisioning_progress=MAX(COALESCE(provisioning_progress,0),5), provisioning_step=CASE WHEN COALESCE(provisioning_progress,0)>0 THEN provisioning_step ELSE 'Démarrage de la préparation' END, provisioning_error=NULL, updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(orgId)}`);
-    const provisionArgs = ["scripts/provision-school.mjs", "--subdomain", subdomain, "--org-id", orgId, "--apply", "--defer-deploy"];
+    const provisionArgs = ["scripts/provision-school.mjs", "--subdomain", subdomain, "--org-id", orgId, "--apply"];
     log("provision_school_invocation", { orgId, subdomainJson: JSON.stringify(subdomain), subdomainLength: subdomain.length, args: provisionArgs });
     run("node", provisionArgs);
     prepared.push({ orgId, subdomain });
-    log("organization_prepared", { orgId, subdomain, durationMs: Date.now() - orgStartedAt, nextStep: "shared_worker_deploy" });
+    log("organization_prepared", { orgId, subdomain, durationMs: Date.now() - orgStartedAt, nextStep: "cloudflare_worker_automatic_binding_activation" });
   } catch (error) {
     const message = String(error.message || error).slice(0, 1000);
     await runSql(`UPDATE orgs SET provisioning_status='PROVISIONING_FAILED', provisioning_step='Nouvelle tentative automatique planifiée', provisioning_error=${sql(message)}, updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(orgId)}`);
@@ -168,23 +152,9 @@ if (failed.length) log("run_has_failures", { failedCount: failed.length, retry: 
 if (failed.length) process.exitCode = 1;
 
 if (prepared.length) {
-  try {
-    if (process.argv.includes("--persist-routing")) persistTenantRouting();
-    log("shared_worker_deploy_started", { preparedCount: prepared.length });
-    for (const school of prepared) await runSql(`UPDATE orgs SET provisioning_progress=MAX(COALESCE(provisioning_progress,0),95), provisioning_step='Publication du Worker partagé', updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(school.orgId)}`);
-    run("npx", ["wrangler", "deploy"]);
-    log("shared_worker_deploy_succeeded", { preparedCount: prepared.length });
-    for (const school of prepared) {
-      await runSql(`UPDATE orgs SET provisioning_status='ACTIVE', provisioning_progress=100, provisioning_step='Terminé', provisioned_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now'), provisioning_error=NULL, updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(school.orgId)}`);
-      log("organization_activated", { orgId: school.orgId, subdomain: school.subdomain });
-    }
-  } catch (error) {
-    const message = String(error.message || error).slice(0, 1000);
-    log("shared_worker_deploy_failed", { preparedCount: prepared.length, errorName: error?.name || "Error", message: message.replace(/Bearer\s+\S+/ig, "Bearer [redacted]").slice(0, 500) });
-    for (const school of prepared) {
-      await runSql(`UPDATE orgs SET provisioning_status='PROVISIONING_FAILED', provisioning_step='Publication à relancer automatiquement', provisioning_error=${sql(message)}, updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(school.orgId)}`);
-    }
-    throw error;
+  for (const school of prepared) {
+    await runSql("UPDATE orgs SET provisioning_status='PROVISIONING', provisioning_progress=MAX(COALESCE(provisioning_progress,0),90), provisioning_step='D1 prêt; activation automatique du Worker Cloudflare en attente', provisioning_error=NULL, updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=" + sql(school.orgId));
   }
+  log("worker_deploy_skipped", { preparedCount: prepared.length, reason: "GitHub prepares the D1 only; the Cloudflare Worker coordinator attaches and activates it automatically" });
 }
 log("run_finished", { preparedCount: prepared.length, failedCount: failed.length, durationMs: Date.now() - runStartedAt });
