@@ -168,12 +168,12 @@ export const SIGNUP_PAGE_HTML = `<!DOCTYPE html>
         </div>
         <div class="hint" id="logoHint">PNG, JPEG ou WebP — 300 Ko maximum. Utilisé comme icône de l'application.</div>
       </div>
-      <button type="button" class="resumeToggle" id="resumeToggle" aria-expanded="false" aria-controls="resumeFields">J’ai déjà envoyé mon inscription — reprendre le suivi</button>
       <button type="submit" class="submit">Créer le compte</button>
 
       <div id="signupMsg" class="msg" aria-live="polite"></div>
     </form>
     <div class="resumeBox" id="resumeBox">
+      <button type="button" class="resumeToggle" id="resumeToggle" aria-expanded="false" aria-controls="resumeFields">J’ai déjà envoyé mon inscription — reprendre le suivi</button>
       <div id="resumeFields">
         <label for="resumeEmail">Email utilisé pour l’inscription</label>
         <input type="email" id="resumeEmail" autocomplete="email" />
@@ -344,10 +344,11 @@ export const SIGNUP_PAGE_HTML = `<!DOCTYPE html>
     if (output) output.textContent = provisioningLog.join("\\n");
   }
 
-  function pollProvisioningStatus(email, phone) {
+  function pollProvisioningStatus(email, phone, initialProgress) {
     var startedAt = Date.now();
     var checks = 0;
     var stopped = false;
+    var lastConfirmedProgress = Math.max(0, Math.min(100, Number(initialProgress) || 0));
     function check() {
       if (stopped) return;
       var elapsed = Date.now() - startedAt;
@@ -357,7 +358,14 @@ export const SIGNUP_PAGE_HTML = `<!DOCTYPE html>
       callApi("getProvisioningStatus", { email: email, phone: phone }).then(function (res) {
         var d = res && res.data ? res.data : res;
         var status = d && d.provisioningStatus;
-        var percent = Math.max(0, Math.min(100, Number(d && d.progress) || 0));
+        // A transient/older status response can omit progress. Keep the last
+        // confirmed value so a retry or a brief API inconsistency never sends
+        // the progress display back to zero.
+        var reportedProgress = Number(d && d.progress);
+        var percent = Number.isFinite(reportedProgress)
+          ? Math.max(lastConfirmedProgress, Math.max(0, Math.min(100, reportedProgress)))
+          : lastConfirmedProgress;
+        lastConfirmedProgress = percent;
         var step = (d && d.step) || "En attente de confirmation du serveur";
         logProvisioning("Statut=" + (status || "inconnu") + ", progression=" + percent + " %, étape : " + step + (d && d.subdomain !== undefined ? ", sous-domaine=" + JSON.stringify(String(d.subdomain || "")) + " (longueur=" + String(d.subdomain || "").length + ")" : "") + (d && d.dispatchResult ? ", relance=" + d.dispatchResult + (d.dispatchCode ? " (" + d.dispatchCode + ")" : "") + (d.dispatchMessage ? " — " + d.dispatchMessage : "") : "") + (d && d.requestId ? ", référence=" + d.requestId : ""));
         if (d && d.updatedAt) {
@@ -443,12 +451,13 @@ export const SIGNUP_PAGE_HTML = `<!DOCTYPE html>
       document.getElementById("resumeBox").style.display = "none";
       document.getElementById("provisioningScreen").style.display = "block";
       document.getElementById("progressSummary").textContent = "Nous reprenons le suivi de votre inscription.";
-      document.getElementById("progressFill").style.width = Math.max(0, Math.min(100, Number(d.progress) || 0)) + "%";
-      document.getElementById("progressPercent").textContent = Math.max(0, Math.min(100, Number(d.progress) || 0)) + " %";
+      var initialProgress = Math.max(0, Math.min(100, Number(d.progress) || 0));
+      document.getElementById("progressFill").style.width = initialProgress + "%";
+      document.getElementById("progressPercent").textContent = initialProgress + " %";
       document.getElementById("progressStep").textContent = d.step || "Statut récupéré";
       logProvisioning("Inscription retrouvée : " + d.provisioningStatus + ", " + (Number(d.progress) || 0) + " %, " + (d.step || "étape inconnue") + (d.subdomain !== undefined ? "; sous-domaine=" + JSON.stringify(String(d.subdomain || "")) + " (longueur=" + String(d.subdomain || "").length + ")" : "") + (d.dispatchResult ? "; déclenchement=" + d.dispatchResult + (d.dispatchCode ? " (" + d.dispatchCode + ")" : "") + (d.dispatchMessage ? " — " + d.dispatchMessage : "") : "") + (d.requestId ? "; référence=" + d.requestId : "") + ".");
       document.getElementById("provisioningScreen").scrollIntoView({ behavior: "smooth", block: "start" });
-      pollProvisioningStatus(email, phone);
+      pollProvisioningStatus(email, phone, initialProgress);
     }).catch(function () {
       resumeMsg.className = "msg err"; resumeMsg.textContent = "Échec temporaire de la vérification. Réessayez.";
       logProvisioning("Erreur réseau pendant la reprise du suivi.");
