@@ -22,7 +22,7 @@ export const TENANTS = {
   mt1967: { orgId: "MT1967", dbBinding: "DB_MT1967" },
   // SCHOOL_TENANTS_START
   test1: { orgId: "TEST1", dbBinding: "DB_TEST1" },
-  meigens-leraning-center: { orgId: "MT9909", dbBinding: "DB_MT9909" },
+  "meigens-leraning-center": { orgId: "MT9909", dbBinding: "DB_MT9909" },
   "living-word-school-of-ministry": { orgId: "MT6690", dbBinding: "DB_MT6690" },
   // SCHOOL_TENANTS_END
   // stmarc: { orgId: "STMARC", dbBinding: "DB_STMARC" },
