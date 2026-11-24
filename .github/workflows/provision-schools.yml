@@ -34,7 +34,7 @@ jobs:
         run: npm run provision:pending -- --persist-routing
         env:
           PROVISION_ORG_ID: ${{ github.event.client_payload.orgId || inputs.org_id || '' }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_ZONE_ID: ${{ vars.CLOUDFLARE_ZONE_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           PAGES_TARGET_HOST: ${{ vars.PAGES_TARGET_HOST }}
