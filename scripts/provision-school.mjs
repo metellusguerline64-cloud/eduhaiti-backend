@@ -215,6 +215,19 @@ if (bindingBlock) {
 
 const tenantsPath = "src/lib/tenants.js";
 let tenants = await read(tenantsPath);
+// Repair legacy bare tenant keys containing hyphens before Wrangler bundles
+// this module. Keys such as meigens-leraning-center are invalid JavaScript
+// unless quoted; preserve their existing spelling and values.
+const tenantBlockStart = tenants.indexOf("export const TENANTS = {");
+const tenantBlockEnd = tenantBlockStart >= 0 ? tenants.indexOf("\n};", tenantBlockStart) : -1;
+if (tenantBlockStart < 0 || tenantBlockEnd < 0) fail("tenants.js is missing a complete TENANTS object.");
+const tenantBlock = tenants.slice(tenantBlockStart, tenantBlockEnd);
+const normalizedTenantBlock = tenantBlock.replace(/^(\s*)([a-z0-9]+(?:-[a-z0-9]+)+)(\s*:)/gm, '$1"$2"$3');
+if (normalizedTenantBlock !== tenantBlock) {
+  tenants = `${tenants.slice(0, tenantBlockStart)}${normalizedTenantBlock}${tenants.slice(tenantBlockEnd)}`;
+  await write(tenantsPath, tenants);
+  log("tenant_keys_quoted", { stage: currentStage });
+}
 const tenantLine = tenants.split(/\r?\n/).find((line) => new RegExp(`^\\s*(?:"${subdomain}"|${subdomain})\\s*:`).test(line));
 if (tenantLine) {
   if (!tenantLine.includes(`orgId: "${orgId}"`) || !tenantLine.includes(`dbBinding: "${binding}"`)) fail(`tenant ${subdomain} already exists with different routing; refusing to overwrite it.`);
