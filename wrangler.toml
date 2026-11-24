@@ -26,6 +26,11 @@ binding = "DB_MT6690"
 database_name = "eduhaiti-db-living-word-school-of-ministry"
 database_id = "c754d2d5-4c18-4c4f-b66c-614d500c03a7"
 
+[[d1_databases]]
+binding = "DB_MT6571"
+database_name = "eduhaiti-db-collegedieuvivant"
+database_id = "331d6745-56ac-492c-854e-56166df0f3a7"
+
 # SCHOOL_D1_BINDINGS_END
 
 # Next school, once created:
