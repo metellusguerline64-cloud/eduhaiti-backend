@@ -50,12 +50,17 @@ function sql(value) {
 }
 
 async function runSql(statement, json = false) {
+  // D1's --file path uses the import endpoint and returns only an execution
+  // summary, not SELECT rows. Read queries that need JSON results must use
+  // --command so the provisioning queue receives business_id/subdomain values.
+  if (json) {
+    return run("npx", ["wrangler", "d1", "execute", "meigens-master-db", "--remote", "--command", statement.trim(), "--json"]);
+  }
+
   const file = path.join(os.tmpdir(), `eduflow-provision-${process.pid}.sql`);
   await fs.writeFile(file, `${statement.trim()}\n`, "utf8");
   try {
-    const args = ["wrangler", "d1", "execute", "meigens-master-db", "--remote", "--file", file];
-    if (json) args.push("--json");
-    return run("npx", args);
+    return run("npx", ["wrangler", "d1", "execute", "meigens-master-db", "--remote", "--file", file]);
   } finally {
     await fs.rm(file, { force: true });
   }
