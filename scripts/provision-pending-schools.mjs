@@ -89,7 +89,7 @@ async function runSql(statement, json = false) {
 const targetOrgId = await readRequestedOrgId();
 const targetFilter = targetOrgId ? ` AND business_id=${sql(targetOrgId)}` : "";
 const failedRetryFilter = targetOrgId ? "1=1" : "updated_at <= STRFTIME('%Y-%m-%dT%H:%M:%fZ','now','-5 minutes')";
-const queueSql = `SELECT business_id, subdomain, email, phone, pin_hash, provisioning_status FROM orgs WHERE deleted_at IS NULL AND (provisioning_status IN ('PENDING_PROVISIONING','PROVISIONING') OR (provisioning_status='PROVISIONING_FAILED' AND ${failedRetryFilter}))${targetFilter} ORDER BY created_at LIMIT 1`;
+const queueSql = `SELECT business_id, subdomain, email, phone, pin_hash, provisioning_status, provisioning_progress, provisioning_step FROM orgs WHERE deleted_at IS NULL AND (provisioning_status IN ('PENDING_PROVISIONING','PROVISIONING') OR (provisioning_status='PROVISIONING_FAILED' AND ${failedRetryFilter}))${targetFilter} ORDER BY created_at LIMIT 1`;
 const raw = await runSql(queueSql, true);
 const jsonStart = raw.indexOf("[");
 const jsonEnd = raw.lastIndexOf("]");
@@ -120,6 +120,8 @@ for (const org of pending) {
     subdomainLength: subdomain.length,
     subdomainCodePoints,
     previousStatus: org.provisioning_status,
+    previousProgress: Number(org.provisioning_progress) || 0,
+    previousStep: org.provisioning_step || null,
   });
   try {
     process.env.PROVISION_ADMIN_EMAIL = String(org.email || "").trim().toLowerCase();
@@ -128,7 +130,20 @@ for (const org of pending) {
     // 509/+509/8-digit forms) — provision-school.mjs normalizes it before
     // writing to users.phone.
     process.env.PROVISION_ADMIN_PHONE = String(org.phone || "").trim();
-    await runSql(`UPDATE orgs SET provisioning_status='PROVISIONING', provisioning_progress=5, provisioning_step='Démarrage de la préparation', provisioning_error=NULL, updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(orgId)}`);
+    const previousProgress = Math.max(0, Math.min(100, Number(org.provisioning_progress) || 0));
+    // A failure at 95% is the final shared Worker publish, after this school's
+    // database and tenant route have already been prepared. Retry only that
+    // publish; rerunning school creation can recreate resources and falsely
+    // restart the visible progress bar.
+    if (previousProgress >= 95) {
+      await runSql(`UPDATE orgs SET provisioning_status='PROVISIONING', provisioning_progress=MAX(COALESCE(provisioning_progress,0),95), provisioning_step='Nouvelle tentative de publication du Worker partagé', provisioning_error=NULL, updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(orgId)}`);
+      prepared.push({ orgId, subdomain });
+      log("organization_publish_retry", { orgId, subdomain, preservedProgress: previousProgress, skippedSchoolPreparation: true });
+      continue;
+    }
+    // Preserve progress from an interrupted attempt. provision-school.mjs
+    // records the next confirmed step; this runner must never reset it to 5%.
+    await runSql(`UPDATE orgs SET provisioning_status='PROVISIONING', provisioning_progress=MAX(COALESCE(provisioning_progress,0),5), provisioning_step=CASE WHEN COALESCE(provisioning_progress,0)>0 THEN provisioning_step ELSE 'Démarrage de la préparation' END, provisioning_error=NULL, updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(orgId)}`);
     const provisionArgs = ["scripts/provision-school.mjs", "--subdomain", subdomain, "--org-id", orgId, "--apply", "--defer-deploy"];
     log("provision_school_invocation", { orgId, subdomainJson: JSON.stringify(subdomain), subdomainLength: subdomain.length, args: provisionArgs });
     run("node", provisionArgs);
@@ -156,7 +171,7 @@ if (prepared.length) {
   try {
     if (process.argv.includes("--persist-routing")) persistTenantRouting();
     log("shared_worker_deploy_started", { preparedCount: prepared.length });
-    for (const school of prepared) await runSql(`UPDATE orgs SET provisioning_progress=95, provisioning_step='Publication du Worker partagé', updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(school.orgId)}`);
+    for (const school of prepared) await runSql(`UPDATE orgs SET provisioning_progress=MAX(COALESCE(provisioning_progress,0),95), provisioning_step='Publication du Worker partagé', updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id=${sql(school.orgId)}`);
     run("npx", ["wrangler", "deploy"]);
     log("shared_worker_deploy_succeeded", { preparedCount: prepared.length });
     for (const school of prepared) {
