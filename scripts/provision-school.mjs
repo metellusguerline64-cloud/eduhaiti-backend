@@ -95,7 +95,7 @@ function setSignupProgress(progress, step) {
   const safeStep = String(step).replaceAll("'", "''");
   const value = Math.max(0, Math.min(99, Number(progress) || 0));
   run("npx", ["wrangler", "d1", "execute", "meigens-master-db", "--remote", "--command",
-    `UPDATE orgs SET provisioning_progress=${value}, provisioning_step='${safeStep}', updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id='${orgId}'`]);
+    `UPDATE orgs SET provisioning_progress=MAX(COALESCE(provisioning_progress,0),${value}), provisioning_step=CASE WHEN COALESCE(provisioning_progress,0)>${value} THEN provisioning_step ELSE '${safeStep}' END, updated_at=STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE business_id='${orgId}'`]);
   log("progress_saved", { progress: value, progressStep: step });
 }
 
